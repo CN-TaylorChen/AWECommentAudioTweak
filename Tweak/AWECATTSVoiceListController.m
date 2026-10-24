@@ -42,11 +42,20 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [self loadCustomVoices];
     [self loadRecommended];
 
-    self.title = @"音色";
+    self.title = [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
 
     UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(addCustomVoice)];
     self.navigationItem.rightBarButtonItem = addBtn;
+
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
+    UILabel *verLabel = [[UILabel alloc] initWithFrame:footer.bounds];
+    verLabel.text = [NSString stringWithFormat:@"%@ v%@ / CN-TaylorChen 维护", AWECAProductName, AWECAVersion];
+    verLabel.textAlignment = NSTextAlignmentCenter;
+    verLabel.font = [UIFont systemFontOfSize:12];
+    verLabel.textColor = [UIColor secondaryLabelColor];
+    [footer addSubview:verLabel];
+    self.tableView.tableFooterView = footer;
 
     UISearchBar *sb = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
     sb.placeholder = @"搜索音色...";
