@@ -14,6 +14,9 @@
 
 @property (nonatomic, assign) BOOL enhanceEnabled;
 @property (nonatomic, assign, readonly) BOOL armed;
+// 最近一次「取消录制」的时间戳（NSDate reference 时间；0 = 从未取消或已开新录音）。
+// 钩子用它识别「取消后紧跟的 DidFinishRecording 残留」——抖音取消时也会以 success:YES 回调
+@property (nonatomic, assign, readonly) NSTimeInterval lastCancelAt;
 
 + (BOOL)shouldShowStatusDot;
 + (void)refreshStatusDots;
