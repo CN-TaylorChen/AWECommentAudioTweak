@@ -5,6 +5,8 @@
 
 #define kAWECAEnhanceEnabled @"AWECAEnhanceEnabled"
 #define kAWECAStatusDotTag   19527
+// 识别资源 ID（留空 = 默认 2.0 标准版 volc.seedasr.auc；1.0 历史版填 volc.bigasr.auc）
+#define kAWECAASRResourceId  @"AWECAASRResourceId"
 
 @interface AWECARecordEnhance : NSObject
 
