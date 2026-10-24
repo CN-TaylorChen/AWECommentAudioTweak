@@ -17,7 +17,8 @@ AWECommentAudioTweak_FILES = Tweak/Tweak.x \
 	Tweak/AWECATTSController.m \
 	Tweak/AWECATTSVoiceListController.m \
 	Tweak/AWECACommentHeaderButton.m \
-	Tweak/AWECARecordEnhance.m
+	Tweak/AWECARecordEnhance.m \
+	Tweak/AWECATOSUploader.m
 
 AWECommentAudioTweak_CFLAGS = -fobjc-arc
 AWECommentAudioTweak_LDFLAGS = -Xlinker -not_for_dyld_shared_cache
