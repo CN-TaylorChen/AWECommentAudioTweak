@@ -59,7 +59,7 @@ static NSString *AWECAASRCodeHint(NSString *code) {
 @property (nonatomic, strong) NSMutableArray *waiters;   // 元素：@{@"path": 路径, @"block": completion}
 @property (nonatomic, assign) BOOL finishedOnce;
 @property (nonatomic, assign) NSUInteger pipelineEpoch;
-@property (nonatomic, assign) NSTimeInterval lastCancelAt; // 最近一次取消的时间戳（reference 时间），供钩子识别取消残留
+@property (nonatomic, assign) BOOL cancelledTake; // 取消后待消费的残留标记，供钩子识别取消的 DidFinishRecording
 @end
 
 @implementation AWECARecordEnhance
@@ -107,11 +107,14 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 
 - (void)markCommentTakeStarted {
     self.armed = YES;
-    self.lastCancelAt = 0; // 新录音开始，此前的取消不再相关
+    self.cancelledTake = NO; // 新录音开始，此前的取消不再相关
 }
 
 - (void)markCommentTakeCancelled {
-    self.lastCancelAt = [NSDate timeIntervalSinceReferenceDate];
+    self.armed = NO;
+    // 状态标记（非时间窗口）：取消后任何迟到的 DidFinishRecording 都是这一遍的残留，
+    // 直到下次 markCommentTakeStarted 才放行——主线程忙时完成回调可能迟到任意久
+    self.cancelledTake = YES;
     // 取消时必须作废在飞流水线：否则取消的录音会白跑上传+识别+合成，
     // 其结果（成功/失败）还会写入路径缓存，导致抖音复用同一路径时后续录音全部假提示
     [self invalidatePipeline:@"已取消，保留原声"];
@@ -119,17 +122,15 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 
 // 作废当前流水线：epoch++ 使所有迟到回调被防护挡下（不 install、不写缓存、不假 toast）
 - (void)invalidatePipeline:(NSString *)message {
-    if (!self.busy) {
-        self.armed = NO;
-        return;
-    }
+    if (!self.busy) return;
     self.pipelineEpoch += 1;
     self.finishedOnce = YES;
     self.busy = NO;
+    NSString *p = self.inFlightPath; // 先保存再清空：flush 时让路径匹配的 waiter 收到取消消息（而非"任务冲突"）
     self.inFlightPath = nil;
     self.inFlightStamp = nil;
     self.lastMessage = message;
-    [self flushWaitersOk:NO path:nil message:message];
+    [self flushWaitersOk:NO path:p message:message];
 }
 
 // 文件指纹：size + 修改时间。抖音取消后重录常复用同一路径，仅靠路径判断会把旧结果错判给新文件
@@ -165,6 +166,13 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 - (void)waitForEnhancedPath:(NSString *)path
                  completion:(void(^)(BOOL ok, NSString *message))completion {
     if (!path.length) {
+        if (completion) completion(NO, nil);
+        return;
+    }
+    // 文件不存在或为空（抖音取消时已删除/截断录音文件）：不启动流水线、不写缓存、不报错。
+    // 这是取消场景的兜底——即使取消残留标记因"取消后极速重录"被提前清零，也绝不会去读已删的文件
+    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    if (!attr || attr.fileSize == 0) {
         if (completion) completion(NO, nil);
         return;
     }
