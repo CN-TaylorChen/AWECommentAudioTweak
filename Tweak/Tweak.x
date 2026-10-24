@@ -33,13 +33,18 @@ static void setupAudioInputElementHook(void);
     NSString *path = self.audioFilePath.length ? self.audioFilePath : self.recorder.url.path;
     AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
 
+    // 取消残留双保险：上滑取消时抖音也会以 success:YES 走到这里（文件落盘后被丢弃），
+    // 距上次取消不足 0.5s 的完成事件一律视为取消残留，不启动流水线（正常录音必先经 markCommentTakeStarted 清零）
+    NSTimeInterval sinceCancel = enhance.lastCancelAt > 0 ? [NSDate timeIntervalSinceReferenceDate] - enhance.lastCancelAt : -1;
+    BOOL cancelResidue = (sinceCancel >= 0 && sinceCancel < 0.5);
+
     if (success && enhance.enhanceEnabled && enhance.armed && ![enhance shouldRunForCommentRecording]) {
         [AWECAUtils showToast:@"请先填写火山 API Key"];
         %orig;
         return;
     }
 
-    if (success && [enhance shouldRunForCommentRecording] && path.length) {
+    if (success && !cancelResidue && [enhance shouldRunForCommentRecording] && path.length) {
         [enhance beginIfNeededAtPath:path];
         %orig;
         return;
