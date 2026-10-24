@@ -371,8 +371,9 @@ static int aweca_mapPitchToV3(float ratio) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         if (errMsg.length) {
-            if (errCode == 55000000) errMsg = @"音色与资源不匹配：复刻音色(S_开头)需在火山控制台开通「声音复刻2.0字符版」，且复刻音色不能过期";
-            if (completion) completion(NO, nil, [NSString stringWithFormat:@"合成错误(%ld): %@", (long)errCode, errMsg]);
+            NSString *finalMsg = errMsg;
+            if (errCode == 55000000) finalMsg = @"音色与资源不匹配：复刻音色(S_开头)需在火山控制台开通「声音复刻2.0字符版」，且复刻音色不能过期";
+            if (completion) completion(NO, nil, [NSString stringWithFormat:@"合成错误(%ld): %@", (long)errCode, finalMsg]);
         } else {
             if (completion) completion(NO, nil, @"音频数据为空");
         }
