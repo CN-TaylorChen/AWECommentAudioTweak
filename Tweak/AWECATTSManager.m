@@ -11,6 +11,7 @@
 
 #define kTTSV3UnidirURL @"https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 #define kTTSResourceTTS2 @"seed-tts-2.0"
+#define kTTSResourceICL2 @"seed-icl-2.0"
 
 static NSString *AWECATrim(NSString *s) {
     if (![s isKindOfClass:[NSString class]]) return @"";
@@ -193,14 +194,16 @@ static int aweca_mapPitchToV3(float ratio) {
     return s;
 }
 
-- (NSString *)volcanoTTSAdditionsJSON {
+- (NSString *)volcanoTTSAdditionsJSONAllowContext:(BOOL)allowContext {
     NSMutableDictionary *add = [NSMutableDictionary dictionary];
     int pitch = aweca_mapPitchToV3(self.pitchRatio);
     if (pitch != 0) {
         add[@"post_process"] = @{ @"pitch": @(pitch) };
     }
-    NSString *ctx = AWECATrim(self.contextText);
-    if (ctx.length) add[@"context_texts"] = @[ctx];
+    if (allowContext) {
+        NSString *ctx = AWECATrim(self.contextText);
+        if (ctx.length) add[@"context_texts"] = @[ctx];
+    }
     NSString *dialect = [AWECATTSManager canonicalDialect:self.explicitDialect];
     if (dialect.length && [self currentVoiceSupportsDialect]) {
         add[@"explicit_dialect"] = dialect;
@@ -240,6 +243,9 @@ static int aweca_mapPitchToV3(float ratio) {
     }
 
     NSString *speaker = [self volcanoTTS2Speaker];
+    // 声音复刻音色（S_xxx / icl_ 开头）必须使用复刻资源 ID（seed-icl-2.0），
+    // 否则报 55000000 resource ID is mismatched with speaker related resource
+    BOOL isCloneVoice = ([speaker hasPrefix:@"S_"] || [speaker hasPrefix:@"s_"] || [speaker hasPrefix:@"icl_"]);
     NSMutableDictionary *reqParams = [@{
         @"text": text,
         @"speaker": speaker,
@@ -250,7 +256,9 @@ static int aweca_mapPitchToV3(float ratio) {
             @"loudness_rate": @(aweca_mapRatioToV3(self.volumeRatio, 100, -50, 100))
         }
     } mutableCopy];
-    NSString *additions = [self volcanoTTSAdditionsJSON];
+    // 官方要求：speaker 为复刻音色时需指定 model，指定后不支持语音指令 context_texts
+    if (isCloneVoice) reqParams[@"model"] = @"seed-tts-2.0-standard";
+    NSString *additions = [self volcanoTTSAdditionsJSONAllowContext:(!isCloneVoice)];
     if (additions.length) reqParams[@"additions"] = additions;
 
     NSDictionary *body = @{
@@ -271,7 +279,7 @@ static int aweca_mapPitchToV3(float ratio) {
     request.timeoutInterval = 45;
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [request setValue:[[NSUUID UUID] UUIDString] forHTTPHeaderField:@"X-Api-Request-Id"];
-    [request setValue:kTTSResourceTTS2 forHTTPHeaderField:@"X-Api-Resource-Id"];
+    [request setValue:(isCloneVoice ? kTTSResourceICL2 : kTTSResourceTTS2) forHTTPHeaderField:@"X-Api-Resource-Id"];
     [self applyVolcanoHTTPAuthToRequest:request];
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -285,8 +293,10 @@ static int aweca_mapPitchToV3(float ratio) {
         NSString *apiCode = AWECAHeader(http.allHeaderFields, @"X-Api-Status-Code");
         NSString *apiMsg = AWECAHeader(http.allHeaderFields, @"X-Api-Message");
         if (apiCode.length && ![apiCode isEqualToString:@"20000000"] && ![apiCode isEqualToString:@"0"]) {
+            NSString *hint = apiMsg.length ? apiMsg : @"失败";
+            if ([apiCode isEqualToString:@"55000000"]) hint = @"音色与资源不匹配：复刻音色(S_开头)需在火山控制台开通「声音复刻2.0字符版」，且复刻音色不能过期";
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(NO, nil, [NSString stringWithFormat:@"合成错误(%@): %@", apiCode, apiMsg.length ? apiMsg : @"失败"]);
+                if (completion) completion(NO, nil, [NSString stringWithFormat:@"合成错误(%@): %@", apiCode, hint]);
             });
             return;
         }
@@ -361,6 +371,7 @@ static int aweca_mapPitchToV3(float ratio) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         if (errMsg.length) {
+            if (errCode == 55000000) errMsg = @"音色与资源不匹配：复刻音色(S_开头)需在火山控制台开通「声音复刻2.0字符版」，且复刻音色不能过期";
             if (completion) completion(NO, nil, [NSString stringWithFormat:@"合成错误(%ld): %@", (long)errCode, errMsg]);
         } else {
             if (completion) completion(NO, nil, @"音频数据为空");
