@@ -7,6 +7,19 @@
 // sha256("")，空 body 的 GET/DELETE 请求用它作 payload hash
 static NSString *const kAWECAEmptySHA256 = @"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+// 从 TOS 错误响应 XML 里取 <Tag>内容</Tag>
+static NSString *AWECATOSXMLElement(NSString *xml, NSString *tag) {
+    NSString *open = [NSString stringWithFormat:@"<%@>", tag];
+    NSString *close = [NSString stringWithFormat:@"</%@>", tag];
+    NSRange o = [xml rangeOfString:open];
+    if (o.location == NSNotFound) return nil;
+    NSRange c = [xml rangeOfString:close];
+    if (c.location == NSNotFound) return nil;
+    NSInteger start = o.location + o.length;
+    if (c.location < start) return nil;
+    return [xml substringWithRange:NSMakeRange(start, c.location - start)];
+}
+
 @implementation AWECATOSUploader
 
 #pragma mark - 配置
@@ -57,7 +70,7 @@ static NSString *const kAWECAEmptySHA256 = @"e3b0c44298fc1c149afbf4c8996fb92427a
 
 // RFC3986 编码；keepSlash=NO 时连 '/' 一起编码（用于 query value）
 + (NSString *)uriEncode:(NSString *)s keepSlash:(BOOL)keepSlash {
-    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
+    NSMutableCharacterSet *allowed = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
     [allowed addCharactersInString:@"-._~"];
     if (keepSlash) [allowed addCharactersInString:@"/"];
     return [s stringByAddingPercentEncodingWithAllowedCharacters:allowed];
@@ -186,24 +199,10 @@ static NSString *const kAWECAEmptySHA256 = @"e3b0c44298fc1c149afbf4c8996fb92427a
             NSString *detail = [NSString stringWithFormat:@"TOS 上传失败 (HTTP %ld)", (long)http.statusCode];
             if (d.length) {
                 NSString *body = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"";
-                NSRange codeRange = [body rangeOfString:@"<Code>"];
-                NSRange msgRange = [body rangeOfString:@"<Message>"];
-                if (codeRange.location != NSNotFound) {
-                    NSRange after = [codeRange rangeValue];
-                    NSRange end = [body rangeOfString:@"</Code>"];
-                    if (end.location != NSNotFound) {
-                        NSString *code = [body substringWithRange:NSMakeRange(after.location + after.length, end.location - after.location - after.length)];
-                        detail = [detail stringByAppendingFormat:@" [%@]", code];
-                    }
-                }
-                if (msgRange.location != NSNotFound) {
-                    NSRange after = [msgRange rangeValue];
-                    NSRange end = [body rangeOfString:@"</Message>"];
-                    if (end.location != NSNotFound) {
-                        NSString *msg = [body substringWithRange:NSMakeRange(after.location + after.length, end.location - after.location - after.length)];
-                        detail = [detail stringByAppendingFormat:@" %@", msg];
-                    }
-                }
+                NSString *code = AWECATOSXMLElement(body, @"Code");
+                NSString *msg = AWECATOSXMLElement(body, @"Message");
+                if (code.length) detail = [detail stringByAppendingFormat:@" [%@]", code];
+                if (msg.length) detail = [detail stringByAppendingFormat:@" %@", msg];
             }
             finish(nil, [NSError errorWithDomain:@"AWECATOS" code:http.statusCode
                 userInfo:@{NSLocalizedDescriptionKey: detail}]);
@@ -232,7 +231,7 @@ static NSString *const kAWECAEmptySHA256 = @"e3b0c44298fc1c149afbf4c8996fb92427a
         @"X-Tos-SignedHeaders": @"host",
     };
     NSMutableString *query = [NSMutableString string];
-    for (NSString *k in [params keysSortedByValueUsingSelector:@selector(compare:)]) {
+    for (NSString *k in [[params allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
         if (query.length) [query appendString:@"&"];
         [query appendFormat:@"%@=%@", [self uriEncode:k keepSlash:NO], [self uriEncode:params[k] keepSlash:NO]];
     }
