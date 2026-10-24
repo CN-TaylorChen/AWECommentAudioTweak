@@ -8,6 +8,7 @@
 #import "AWECATTSController.h"
 #import "AWECATTSVoiceListController.h"
 #import "AWECARecordEnhance.h"
+#import "AWECATOSUploader.h"
 #import "AWECAUtils.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <SafariServices/SafariServices.h>
@@ -777,7 +778,8 @@ static UIColor *AWECAOnPrimary(void) {
     UIButton *gh = [self aweca_linkBtnIcon:kGitHubIconB64 title:@"GitHub" action:@selector(openGitHub)];
     UIButton *tg = [self aweca_linkBtnIcon:kTelegramIconB64 title:@"Telegram" action:@selector(openTelegram)];
     UIButton *api = [self aweca_linkBtnIcon:kAPIIconB64 title:@"API" action:@selector(aweca_showAPISettings)];
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[gh, tg, api]];
+    UIButton *asr = [self aweca_linkBtnText:@"识别" action:@selector(aweca_showTOSSettings)];
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[gh, tg, api, asr]];
     stack.axis = UILayoutConstraintAxisHorizontal;
     stack.alignment = UIStackViewAlignmentCenter;
     stack.spacing = 16;
@@ -828,6 +830,73 @@ static UIColor *AWECAOnPrimary(void) {
         mgr.appID = ac.textFields.firstObject.text;
         mgr.accessToken = ac.textFields.count > 1 ? ac.textFields[1].text : @"";
         [mgr saveConfig];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// 无图标的文字链接按钮（与 aweca_linkBtnIcon 同风格）
+- (UIButton *)aweca_linkBtnText:(NSString *)title action:(SEL)sel {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor tertiaryLabelColor] forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:13];
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [b addTarget:self action:sel forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
+// 识别/TOS 设置：标准版识别只收公网音频 URL，录音需先传 TOS
+- (void)aweca_showTOSSettings {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"识别设置（TOS 上传）"
+                                                               message:@"录音文件识别标准版只收公网音频URL，\n需先用火山 TOS 上传录音。\n在控制台创建 Bucket 并获取 AK/SK。"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"TOS AccessKey ID";
+        tf.text = [ud stringForKey:kAWECATOSAccessKey] ?: @"";
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"TOS SecretAccessKey";
+        tf.text = [ud stringForKey:kAWECATOSSecretKey] ?: @"";
+        tf.secureTextEntry = YES;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"Bucket 名称";
+        tf.text = [ud stringForKey:kAWECATOSBucket] ?: @"";
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"区域（留空=cn-beijing）";
+        tf.text = [ud stringForKey:kAWECATOSRegion] ?: @"";
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"识别资源ID（留空=volc.seedasr.auc）";
+        tf.text = [ud stringForKey:kAWECAASRResourceId] ?: @"";
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        NSArray<UITextField *> *tfs = ac.textFields;
+        [ud setObject:[tfs[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] forKey:kAWECATOSAccessKey];
+        [ud setObject:[tfs[1].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] forKey:kAWECATOSSecretKey];
+        [ud setObject:[tfs[2].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] forKey:kAWECATOSBucket];
+        [ud setObject:[tfs[3].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] forKey:kAWECATOSRegion];
+        [ud setObject:[tfs[4].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] forKey:kAWECAASRResourceId];
+        [ud synchronize];
+        if ([AWECATOSUploader hasCredentials]) {
+            [AWECAUtils showToast:@"识别设置已保存" duration:1.5];
+        } else {
+            [AWECAUtils showToast:@"已保存，但 AK/SK/Bucket 不完整将无法识别" duration:2.0];
+        }
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
