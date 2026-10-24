@@ -19,6 +19,9 @@
 #define kAWECATTSVolcanoVoiceType @"AWECATTSVolcanoVoiceType"
 #define kAWECATTSVolcanoVoiceName @"AWECATTSVolcanoVoiceName"
 
+#define AWECAProductName   @"声临"
+#define AWECAVersion       @"1.2.0"
+
 @interface AWECATTSManager : NSObject <AVAudioPlayerDelegate>
 
 + (instancetype)shared;
