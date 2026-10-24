@@ -50,12 +50,16 @@ static NSString *AWECAASRCodeHint(NSString *code) {
 @property (nonatomic, assign) BOOL armed;
 @property (nonatomic, assign) BOOL busy;
 @property (nonatomic, copy) NSString *inFlightPath;
+@property (nonatomic, copy) NSString *inFlightStamp;    // 流水线启动时目标文件的指纹，防止覆盖已被改动的文件
 @property (nonatomic, copy) NSString *lastEnhancedPath;
+@property (nonatomic, copy) NSString *lastEnhancedStamp; // 成功结果对应的文件指纹，路径复用时不误命中缓存
 @property (nonatomic, copy) NSString *lastFailedPath;
+@property (nonatomic, copy) NSString *lastFailedStamp;
 @property (nonatomic, copy) NSString *lastMessage;
-@property (nonatomic, strong) NSMutableArray *waiters;
+@property (nonatomic, strong) NSMutableArray *waiters;   // 元素：@{@"path": 路径, @"block": completion}
 @property (nonatomic, assign) BOOL finishedOnce;
 @property (nonatomic, assign) NSUInteger pipelineEpoch;
+@property (nonatomic, assign) NSTimeInterval lastCancelAt; // 最近一次取消的时间戳（reference 时间），供钩子识别取消残留
 @end
 
 @implementation AWECARecordEnhance
@@ -103,11 +107,38 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 
 - (void)markCommentTakeStarted {
     self.armed = YES;
+    self.lastCancelAt = 0; // 新录音开始，此前的取消不再相关
 }
 
 - (void)markCommentTakeCancelled {
-    if (self.busy) return;
-    self.armed = NO;
+    self.lastCancelAt = [NSDate timeIntervalSinceReferenceDate];
+    // 取消时必须作废在飞流水线：否则取消的录音会白跑上传+识别+合成，
+    // 其结果（成功/失败）还会写入路径缓存，导致抖音复用同一路径时后续录音全部假提示
+    [self invalidatePipeline:@"已取消，保留原声"];
+}
+
+// 作废当前流水线：epoch++ 使所有迟到回调被防护挡下（不 install、不写缓存、不假 toast）
+- (void)invalidatePipeline:(NSString *)message {
+    if (!self.busy) {
+        self.armed = NO;
+        return;
+    }
+    self.pipelineEpoch += 1;
+    self.finishedOnce = YES;
+    self.busy = NO;
+    self.inFlightPath = nil;
+    self.inFlightStamp = nil;
+    self.lastMessage = message;
+    [self flushWaitersOk:NO path:nil message:message];
+}
+
+// 文件指纹：size + 修改时间。抖音取消后重录常复用同一路径，仅靠路径判断会把旧结果错判给新文件
+- (NSString *)fileStampForPath:(NSString *)path {
+    if (!path.length) return nil;
+    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    if (!attr) return nil;
+    return [NSString stringWithFormat:@"%llu|%@",
+            (unsigned long long)attr.fileSize, attr.fileModificationDate];
 }
 
 - (BOOL)hasVolcanoCredentials {
@@ -137,24 +168,35 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
         if (completion) completion(NO, nil);
         return;
     }
-    if (!self.busy && [self.lastEnhancedPath isEqualToString:path]) {
+    // 结果缓存早退：必须同时校验文件指纹，防止抖音复用同一路径时把旧结果错发给新录音
+    NSString *stamp = [self fileStampForPath:path];
+    if (!self.busy && stamp.length && self.lastEnhancedPath.length &&
+        [self.lastEnhancedPath isEqualToString:path] && [self.lastEnhancedStamp isEqualToString:stamp]) {
         if (completion) completion(YES, self.lastMessage);
         return;
     }
-    if (!self.busy && [self.lastFailedPath isEqualToString:path]) {
+    if (!self.busy && self.lastFailedPath.length &&
+        [self.lastFailedPath isEqualToString:path] && [self.lastFailedStamp isEqualToString:stamp]) {
         if (completion) completion(NO, self.lastMessage);
         return;
     }
-    if (completion) [self.waiters addObject:[completion copy]];
+    if (completion) {
+        [self.waiters addObject:@{ @"path": path, @"block": [completion copy] }];
+    }
     if (self.busy) return;
     [self startPipelineAtPath:path];
 }
 
-- (void)flushWaitersOk:(BOOL)ok message:(NSString *)msg {
+// 只唤醒路径匹配的等待者；不匹配的（旧流水线结束时挂进来的新路径）以冲突失败唤醒，
+// 避免旧结果张冠李戴（toast 假成功、时长按错文件算、新录音实际未增强）
+- (void)flushWaitersOk:(BOOL)ok path:(NSString *)path message:(NSString *)msg {
     NSArray *list = [self.waiters copy];
     [self.waiters removeAllObjects];
-    for (void (^cb)(BOOL, NSString *) in list) {
-        cb(ok, msg);
+    for (NSDictionary *entry in list) {
+        void (^cb)(BOOL, NSString *) = entry[@"block"];
+        NSString *wPath = entry[@"path"];
+        BOOL match = (path.length > 0 && [wPath isEqualToString:path]);
+        cb(match ? ok : NO, match ? msg : @"与上一个任务冲突，请重试");
     }
 }
 
@@ -164,21 +206,32 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     self.pipelineEpoch += 1;
     self.busy = NO;
     self.inFlightPath = nil;
+    self.inFlightStamp = nil;
     self.lastMessage = msg;
-    if (ok) {
+    NSString *stamp = [self fileStampForPath:path];
+    if (ok && stamp.length) {
         self.lastEnhancedPath = path;
+        self.lastEnhancedStamp = stamp;
         self.lastFailedPath = nil;
+        self.lastFailedStamp = nil;
     } else {
         self.lastFailedPath = path;
+        self.lastFailedStamp = stamp; // stamp 为 nil（文件已不在）时不会命中早退，允许下次重试
+        if (ok) {
+            self.lastEnhancedPath = nil;
+            self.lastEnhancedStamp = nil;
+        }
     }
-    [self flushWaitersOk:ok message:msg];
+    [self flushWaitersOk:ok path:path message:msg];
 }
 
 - (void)startPipelineAtPath:(NSString *)path {
     self.busy = YES;
     self.finishedOnce = NO;
     self.inFlightPath = path;
+    self.inFlightStamp = [self fileStampForPath:path];
     self.lastFailedPath = nil;
+    self.lastFailedStamp = nil;
     NSUInteger epoch = ++self.pipelineEpoch;
 
     [AWECAUtils showToast:@"识别合成中..." duration:2.0];
@@ -200,6 +253,12 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
             if (weakSelf.finishedOnce || weakSelf.pipelineEpoch != epoch) return;
             if (!success || !audioPath.length) {
                 [weakSelf finishPipelineOk:NO path:path message:ttsError.length ? [NSString stringWithFormat:@"%@，已保留原声", ttsError] : @"合成失败，已保留原声"];
+                return;
+            }
+            // 文件指纹保护：目标文件若已被改动（典型：路径被新录音复用），绝不安装，
+            // 否则会 removeItem + copy 把别人/新录音的文件物理替换掉
+            if (![weakSelf.inFlightStamp isEqualToString:[weakSelf fileStampForPath:path]]) {
+                [weakSelf finishPipelineOk:NO path:path message:@"录音文件已被改动，保留原声"];
                 return;
             }
             [weakSelf installSynthesizedAudio:audioPath ontoPath:path completion:^(BOOL installed) {
