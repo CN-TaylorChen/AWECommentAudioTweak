@@ -293,6 +293,7 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
         if (apiCode.length && ![apiCode isEqualToString:@"20000000"] && ![apiCode isEqualToString:@"0"]) {
             NSString *hint = apiMsg.length ? apiMsg : @"失败";
             if ([apiCode isEqualToString:@"45001115"]) hint = @"音频解码失败";
+            if ([apiCode isEqualToString:@"45000030"]) hint = @"语音识别极速版未开通：火山控制台「服务管理」→ 录音文件识别2.0 → 预配置 → 选「极速版」标签 → 试用/开通 (volc.bigasr.auc_turbo)。注意标准版与极速版是分开的资源，开通标准版不包含极速版";
             fail([NSString stringWithFormat:@"识别错误(%@): %@", apiCode, hint]);
             return;
         }
@@ -308,6 +309,7 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
         NSInteger code = [json[@"code"] integerValue];
         if (json[@"code"] && code != 0 && code != 20000000 && code != 3000) {
             NSString *msg = json[@"message"] ?: json[@"msg"] ?: @"识别失败";
+            if (code == 45000030) msg = @"语音识别极速版未开通：火山控制台「服务管理」→ 录音文件识别2.0 → 预配置 → 选「极速版」标签 → 试用/开通 (volc.bigasr.auc_turbo)。注意标准版与极速版是分开的资源";
             fail([NSString stringWithFormat:@"识别错误(%ld): %@", (long)code, msg]);
             return;
         }

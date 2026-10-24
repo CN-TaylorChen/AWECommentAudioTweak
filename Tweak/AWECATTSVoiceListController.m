@@ -7,9 +7,11 @@
 #import <objc/runtime.h>
 
 #define kAWECARecommendedVoices @"AWECARecommendedVoices"
+#define kAWECACustomVoices @"AWECACustomVoices"
 
 typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
-    AWECAVoiceSectionRecommended = 0,
+    AWECAVoiceSectionCustom = 0,
+    AWECAVoiceSectionRecommended,
     AWECAVoiceSectionAll,
     AWECAVoiceSectionCount
 };
@@ -18,8 +20,10 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 @interface AWECATTSVoiceListController ()
 @property (nonatomic, strong) UISearchBar *searchBar;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *customVoices;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *recommendedVoices;
 @property (nonatomic, strong) NSArray<NSDictionary *> *allVoices;
+@property (nonatomic, strong) NSArray<NSDictionary *> *filteredCustom;
 @property (nonatomic, strong) NSArray<NSDictionary *> *filteredRecommended;
 @property (nonatomic, strong) NSArray<NSDictionary *> *filteredAll;
 @property (nonatomic, copy) NSString *searchText;
@@ -35,10 +39,14 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     [self buildVoiceData];
+    [self loadCustomVoices];
     [self loadRecommended];
 
     self.title = @"音色";
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
+
+    UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(addCustomVoice)];
+    self.navigationItem.rightBarButtonItem = addBtn;
 
     UISearchBar *sb = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
     sb.placeholder = @"搜索音色...";
@@ -46,6 +54,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     self.tableView.tableHeaderView = sb;
     self.searchBar = sb;
 
+    self.filteredCustom = [self.customVoices mutableCopy];
     self.filteredRecommended = [self.recommendedVoices mutableCopy];
     self.filteredAll = self.allVoices;
 }
@@ -53,6 +62,57 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.navigationController setNavigationBarHidden:NO animated:animated];
+}
+
+#pragma mark - 自定义音色持久化
+
+- (void)loadCustomVoices {
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kAWECACustomVoices];
+    self.customVoices = saved ? [saved mutableCopy] : [NSMutableArray array];
+}
+
+- (void)saveCustomVoices {
+    [[NSUserDefaults standardUserDefaults] setObject:[self.customVoices copy] forKey:kAWECACustomVoices];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (void)addCustomVoice {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"添加音色"
+                                                                   message:@"填写火山引擎音色库中的音色 ID（复刻音色为 S_ 开头，商店/默认音色为 BV 或 zh_/en_ 开头）"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"音色名称（如：我的复刻音色）";
+    }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"音色 ID（voice_type）";
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *name = alert.textFields[0].text ?: @"";
+        NSString *type = [alert.textFields[1].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (type.length == 0) {
+            [AWECAUtils showToast:@"音色 ID 不能为空"];
+            return;
+        }
+        if (name.length == 0) name = type;
+        // 同 ID 去重，已存在则更新名称
+        BOOL exists = NO;
+        for (NSUInteger i = 0; i < self.customVoices.count; i++) {
+            if ([self.customVoices[i][@"voiceType"] isEqualToString:type]) {
+                self.customVoices[i] = @{@"name": name, @"voiceType": type};
+                exists = YES;
+                break;
+            }
+        }
+        if (!exists) [self.customVoices addObject:@{@"name": name, @"voiceType": type}];
+        [self saveCustomVoices];
+        [self filterVoices];
+        [self.tableView reloadData];
+        [AWECAUtils showToast:exists ? @"已更新音色" : @"已添加音色"];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark - 推荐音色持久化
@@ -100,6 +160,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 - (void)filterVoices {
     if (!self.searchText || self.searchText.length == 0) {
+        self.filteredCustom = [self.customVoices mutableCopy];
         self.filteredRecommended = [self.recommendedVoices mutableCopy];
         self.filteredAll = self.allVoices;
         return;
@@ -109,24 +170,31 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         return [[v[@"name"] lowercaseString] containsString:q] ||
                [[v[@"voiceType"] lowercaseString] containsString:q];
     }];
+    self.filteredCustom = [[self.customVoices filteredArrayUsingPredicate:pred] mutableCopy];
     self.filteredRecommended = [[self.recommendedVoices filteredArrayUsingPredicate:pred] mutableCopy];
     self.filteredAll = [self.allVoices filteredArrayUsingPredicate:pred];
 }
 
 #pragma mark - 数据源
 
+- (NSArray<NSDictionary *> *)listForSection:(NSInteger)section {
+    switch (section) {
+        case AWECAVoiceSectionCustom: return self.filteredCustom;
+        case AWECAVoiceSectionRecommended: return self.filteredRecommended;
+        case AWECAVoiceSectionAll: return self.filteredAll;
+        default: return @[];
+    }
+}
+
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return AWECAVoiceSectionCount; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    switch (section) {
-        case AWECAVoiceSectionRecommended: return self.filteredRecommended.count;
-        case AWECAVoiceSectionAll: return self.filteredAll.count;
-        default: return 0;
-    }
+    return [self listForSection:section].count;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
+        case AWECAVoiceSectionCustom: return [NSString stringWithFormat:@"我的音色 (%lu)", (unsigned long)self.filteredCustom.count];
         case AWECAVoiceSectionRecommended: return @"推荐音色";
         case AWECAVoiceSectionAll: return [NSString stringWithFormat:@"全部音色 (%lu)", (unsigned long)self.filteredAll.count];
         default: return nil;
@@ -138,8 +206,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryNone;
 
-    NSArray *list = (indexPath.section == AWECAVoiceSectionRecommended) ? self.filteredRecommended : self.filteredAll;
-    NSDictionary *voice = list[indexPath.row];
+    NSDictionary *voice = [self listForSection:indexPath.section][indexPath.row];
     NSString *name = voice[@"name"];
     NSString *type = voice[@"voiceType"];
 
@@ -171,8 +238,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
-    NSArray *list = (indexPath.section == AWECAVoiceSectionRecommended) ? self.filteredRecommended : self.filteredAll;
-    NSDictionary *voice = list[indexPath.row];
+    NSDictionary *voice = [self listForSection:indexPath.section][indexPath.row];
 
     AWECATTSManager *mgr = [AWECATTSManager shared];
     mgr.voiceType = voice[@"voiceType"];
@@ -195,7 +261,23 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (self.searchText.length > 0) return nil;
 
-    if (indexPath.section == AWECAVoiceSectionRecommended) {
+    if (indexPath.section == AWECAVoiceSectionCustom) {
+        NSDictionary *voice = self.filteredCustom[indexPath.row];
+        NSString *name = voice[@"name"];
+        UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+            title:@"删除" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+            [self.customVoices removeObjectAtIndex:indexPath.row];
+            [self saveCustomVoices];
+            [self filterVoices];
+            [tableView performBatchUpdates:^{
+                [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
+            } completion:nil];
+            [AWECAUtils showToast:[NSString stringWithFormat:@"已删除: %@", name]];
+            completionHandler(YES);
+        }];
+        return [UISwipeActionsConfiguration configurationWithActions:@[removeAction]];
+
+    } else if (indexPath.section == AWECAVoiceSectionRecommended) {
         UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
             title:@"移除" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
             [self.recommendedVoices removeObjectAtIndex:indexPath.row];

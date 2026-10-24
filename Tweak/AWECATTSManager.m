@@ -189,7 +189,8 @@ static int aweca_mapPitchToV3(float ratio) {
     if ([l containsString:@"saturn"]) {
         return [s stringByReplacingOccurrencesOfString:@"saturn" withString:@"uranus"];
     }
-    return kDefaultVoiceType;
+    // 未知音色 ID 原样透传，支持自定义音色（复刻 S_xxx、商店音色等）
+    return s;
 }
 
 - (NSString *)volcanoTTSAdditionsJSON {

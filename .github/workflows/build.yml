@@ -1,0 +1,30 @@
+name: Build AWECommentAudioTweak
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-sdks: 'https://github.com/theos/sdks'
+          theos-sdks-branch: 'master'
+
+      - name: Build dylib
+        env:
+          THEOS: ${{ github.workspace }}/theos
+        run: make
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AWECommentAudioTweak.dylib
+          path: AWECommentAudioTweak.dylib
