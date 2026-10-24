@@ -5,11 +5,46 @@
 #import "AWECATTSManager.h"
 #import "AWECAAudioReplacer.h"
 #import "AWECAUtils.h"
+#import "AWECATOSUploader.h"
 #import <UIKit/UIKit.h>
 
-#define kASRFlashURL @"https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
-#define kASRResourceId @"volc.bigasr.auc_turbo"
-#define kEnhanceTimeout 60.0
+// 录音文件识别标准版：submit 提交 + query 轮询（两段式异步）
+// 标准版只收公网音频 URL，本地录音需先经 TOS 上传（见 AWECATOSUploader）
+// 文档：https://www.volcengine.com/docs/6561/1354868
+#define kASRSubmitURL         @"https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
+#define kASRQueryURL          @"https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
+#define kASRDefaultResourceId @"volc.seedasr.auc"   // 2.0 标准版；1.0 历史版为 volc.bigasr.auc
+#define kEnhanceTimeout       120.0                 // 上传+排队+识别整体超时
+#define kASRQueryInterval     3.0                   // query 轮询间隔（秒）
+#define kASRMaxQueryRounds    30                    // 最多轮询 30 次（约 90 秒）
+#define kASRSubmitRetries     2                     // submit 网络失败重试次数
+
+static NSString *AWECAASRTrim(NSString *s) {
+    if (![s isKindOfClass:[NSString class]]) return @"";
+    return [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static NSString *AWECAASRHeader(NSDictionary *headers, NSString *key) {
+    id v = headers[key];
+    if (!v) {
+        for (NSString *k in headers) {
+            if ([k caseInsensitiveCompare:key] == NSOrderedSame) { v = headers[k]; break; }
+        }
+    }
+    if ([v isKindOfClass:[NSString class]]) return v;
+    if ([v respondsToSelector:@selector(stringValue)]) return [v stringValue];
+    return nil;
+}
+
+static NSString *AWECAASRCodeHint(NSString *code) {
+    if ([code isEqualToString:@"45000030"]) return @"标准版识别未开通：火山控制台「服务管理」→ 录音文件识别 → 开通标准版资源（volc.seedasr.auc / volc.bigasr.auc）。极速版已不开放，勿再选极速版";
+    if ([code isEqualToString:@"45000001"]) return @"请求参数无效（可能是音频 URL 无法下载或格式不支持）";
+    if ([code isEqualToString:@"45000002"]) return @"空音频";
+    if ([code isEqualToString:@"45000151"]) return @"音频格式不正确";
+    if ([code isEqualToString:@"45000132"]) return @"音频超过大小限制";
+    if ([code isEqualToString:@"55000031"]) return @"服务器繁忙，请稍后重试";
+    return nil;
+}
 
 @interface AWECARecordEnhance ()
 @property (nonatomic, assign) BOOL armed;
@@ -220,35 +255,57 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     NSString *wavPath = [path stringByAppendingString:@".aweca.wav"];
     [AWECAUtils convertAudioAtPath:path toWAV16kPath:wavPath completion:^(BOOL success, NSError *error) {
         NSString *sendPath = success ? wavPath : path;
-        [self postFlashASRAtPath:sendPath completion:^(NSString *text, NSString *err) {
+        [self uploadThenRecognizeAtPath:sendPath completion:^(NSString *text, NSString *err) {
             [[NSFileManager defaultManager] removeItemAtPath:wavPath error:nil];
             if (completion) completion(text, err);
         }];
     }];
 }
 
-- (void)postFlashASRAtPath:(NSString *)path completion:(void(^)(NSString *text, NSString *error))completion {
-    AWECATTSManager *mgr = [AWECATTSManager shared];
-    NSData *audio = [NSData dataWithContentsOfFile:path];
-    if (!audio.length) {
-        if (completion) completion(nil, @"录音文件为空");
+#pragma mark - 标准版识别（TOS 上传 + submit + query 轮询）
+
+// 上传录音到 TOS 拿公网 URL → submit → 轮询 query → 删除对象，文本原样回调给 TTS 合成
+- (void)uploadThenRecognizeAtPath:(NSString *)path completion:(void(^)(NSString *text, NSString *error))completion {
+    if (![AWECATOSUploader hasCredentials]) {
+        if (completion) completion(nil, @"未配置 TOS：请先在「识别」设置里填写 AK/SK/Bucket/区域，已保留原声");
         return;
     }
+    NSString *ext = path.pathExtension.lowercaseString;
+    if (!ext.length) ext = @"wav";
+    NSString *objectKey = [NSString stringWithFormat:@"aweca-asr/%@.%@", [[NSUUID UUID] UUIDString], ext];
 
-    NSString *b64 = [audio base64EncodedStringWithOptions:0];
-    BOOL isWav = [[path.pathExtension lowercaseString] isEqualToString:@"wav"];
+    [AWECAUtils showToast:@"上传识别中..." duration:2.0];
+    [AWECATOSUploader uploadFileAtPath:path objectKey:objectKey completion:^(NSString *url, NSError *error) {
+        if (!url.length) {
+            NSString *msg = error.localizedDescription ?: @"上传失败";
+            if (completion) completion(nil, [NSString stringWithFormat:@"%@，已保留原声", msg]);
+            return;
+        }
+        [self submitASRWithURL:url
+                        format:([ext isEqualToString:@"wav"] ? @"wav" : [self audioFormatForPath:path])
+                    completion:^(NSString *text, NSString *err) {
+            [AWECATOSUploader deleteObject:objectKey completion:nil]; // 识别后清理，避免堆积
+            if (completion) completion(text, err);
+        }];
+    }];
+}
+
+// submit：提交音频 URL，成功（X-Api-Status-Code=20000000）后进入 query 轮询
+- (void)submitASRWithURL:(NSString *)url format:(NSString *)format
+              completion:(void(^)(NSString *text, NSString *error))completion {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    NSString *requestId = [[NSUUID UUID] UUIDString]; // submit 与 query 复用同一个 UUID
     NSMutableDictionary *audioDict = [@{
-        @"data": b64,
-        @"format": isWav ? @"wav" : [self audioFormatForPath:path]
+        @"url": url,
+        @"format": format.length ? format : @"wav",
+        @"language": @"zh-CN"
     } mutableCopy];
-    if (isWav) {
+    if ([format isEqualToString:@"wav"]) {
+        audioDict[@"codec"] = @"raw";
         audioDict[@"rate"] = @16000;
         audioDict[@"bits"] = @16;
         audioDict[@"channel"] = @1;
-        audioDict[@"codec"] = @"raw";
     }
-    audioDict[@"language"] = @"zh-CN";
-
     NSDictionary *body = @{
         @"user": @{ @"uid": mgr.appID.length ? mgr.appID : @"aweca_user" },
         @"audio": audioDict,
@@ -258,65 +315,119 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
             @"enable_punc": @YES
         }
     };
-    NSError *jsonErr = nil;
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:&jsonErr];
-    if (!jsonData) {
-        if (completion) completion(nil, @"识别请求构造失败");
+    [self postASRSubmit:body requestId:requestId attempt:0 completion:^(NSString *error) {
+        if (error) { if (completion) completion(nil, error); return; }
+        [self pollASRQuery:requestId attempt:0 completion:completion];
+    }];
+}
+
+- (void)postASRSubmit:(NSDictionary *)body requestId:(NSString *)requestId attempt:(NSInteger)attempt
+            completion:(void(^)(NSString *error))completion {
+    [self postASRRequest:body url:kASRSubmitURL requestId:requestId includeSequence:YES
+               completion:^(NSDictionary *json, NSString *statusCode, NSString *error) {
+        (void)json;
+        if (!error && (!statusCode.length || [statusCode isEqualToString:@"20000000"] || [statusCode isEqualToString:@"0"])) {
+            if (completion) completion(nil); // 提交成功（响应体为空）
+            return;
+        }
+        // 网络类错误重试；接口返回的错误码不重试
+        if (error && attempt + 1 < kASRSubmitRetries) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self postASRSubmit:body requestId:requestId attempt:attempt + 1 completion:completion];
+            });
+            return;
+        }
+        if (completion) {
+            if (error) completion([error stringByAppendingString:@"，已保留原声"]);
+            else {
+                NSString *hint = AWECAASRCodeHint(statusCode) ?: @"提交失败";
+                completion([NSString stringWithFormat:@"识别提交错误(%@): %@，已保留原声", statusCode ?: @"未知", hint]);
+            }
+        }
+    }];
+}
+
+// query 轮询：20000001/20000002 继续等，20000000 取 result.text，其余按错误码映射中文
+- (void)pollASRQuery:(NSString *)requestId attempt:(NSInteger)attempt
+          completion:(void(^)(NSString *text, NSString *error))completion {
+    if (attempt >= kASRMaxQueryRounds) {
+        if (completion) completion(nil, @"识别超时（轮询用尽），已保留原声");
         return;
     }
+    NSTimeInterval delay = (attempt == 0) ? 1.0 : kASRQueryInterval;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self postASRRequest:@{} url:kASRQueryURL requestId:requestId includeSequence:NO
+                   completion:^(NSDictionary *json, NSString *statusCode, NSString *error) {
+            if (error) {
+                // 网络抖动记一轮，继续轮询（整体受 120s 看门狗兜底）
+                [self pollASRQuery:requestId attempt:attempt + 1 completion:completion];
+                return;
+            }
+            if ([statusCode isEqualToString:@"20000000"] || [statusCode isEqualToString:@"0"]) {
+                NSString *text = [self textFromASRJSON:json];
+                if (completion) completion(text.length ? text : nil, text.length ? nil : @"未识别到文字");
+                return;
+            }
+            if ([statusCode isEqualToString:@"20000001"] || [statusCode isEqualToString:@"20000002"]) {
+                [self pollASRQuery:requestId attempt:attempt + 1 completion:completion];
+                return;
+            }
+            if ([statusCode isEqualToString:@"20000003"]) {
+                if (completion) completion(nil, @"未检测到人声（静音），已保留原声");
+                return;
+            }
+            NSString *msg = json[@"message"] ?: json[@"msg"] ?: AWECAASRCodeHint(statusCode) ?: @"失败";
+            if (completion) {
+                completion(nil, [NSString stringWithFormat:@"识别错误(%@): %@，已保留原声",
+                                 statusCode ?: @"未知", msg]);
+            }
+        }];
+    });
+}
 
-    NSString *reqId = [[NSUUID UUID] UUIDString];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kASRFlashURL]];
+// 通用 POST：submit / query 共用；statusCode 取自 X-Api-Status-Code 响应头
+- (void)postASRRequest:(NSDictionary *)body
+                    url:(NSString *)url
+             requestId:(NSString *)requestId
+       includeSequence:(BOOL)includeSequence
+             completion:(void(^)(NSDictionary *json, NSString *statusCode, NSString *error))completion {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    if (!jsonData) jsonData = [NSData data];
+
+    NSString *resourceId = AWECAASRTrim([[NSUserDefaults standardUserDefaults] stringForKey:kAWECAASRResourceId]);
+    if (!resourceId.length) resourceId = kASRDefaultResourceId;
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
     req.HTTPMethod = @"POST";
     req.HTTPBody = jsonData;
-    req.timeoutInterval = 45;
+    req.timeoutInterval = 30;
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [mgr applyVolcanoHTTPAuthToRequest:req];
-    [req setValue:kASRResourceId forHTTPHeaderField:@"X-Api-Resource-Id"];
-    [req setValue:reqId forHTTPHeaderField:@"X-Api-Request-Id"];
-    [req setValue:@"-1" forHTTPHeaderField:@"X-Api-Sequence"];
+    [req setValue:resourceId forHTTPHeaderField:@"X-Api-Resource-Id"];
+    [req setValue:requestId forHTTPHeaderField:@"X-Api-Request-Id"];
+    if (includeSequence) [req setValue:@"-1" forHTTPHeaderField:@"X-Api-Sequence"];
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        void (^fail)(NSString *) = ^(NSString *msg) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (completion) completion(nil, msg);
-            });
+        void (^done)(NSDictionary *, NSString *, NSString *) = ^(NSDictionary *j, NSString *code, NSString *err) {
+            dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(j, code, err); });
         };
         if (error) {
-            fail([NSString stringWithFormat:@"识别网络错误: %@", error.localizedDescription]);
+            done(nil, nil, [NSString stringWithFormat:@"识别网络错误: %@", error.localizedDescription]);
             return;
         }
         NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
-        NSString *apiCode = http.allHeaderFields[@"X-Api-Status-Code"];
-        if (!apiCode) apiCode = http.allHeaderFields[@"x-api-status-code"];
-        NSString *apiMsg = http.allHeaderFields[@"X-Api-Message"] ?: http.allHeaderFields[@"x-api-message"];
-        if (apiCode.length && ![apiCode isEqualToString:@"20000000"] && ![apiCode isEqualToString:@"0"]) {
-            NSString *hint = apiMsg.length ? apiMsg : @"失败";
-            if ([apiCode isEqualToString:@"45001115"]) hint = @"音频解码失败";
-            if ([apiCode isEqualToString:@"45000030"]) hint = @"语音识别极速版未开通：火山控制台「服务管理」→ 录音文件识别2.0 → 预配置 → 选「极速版」标签 → 试用/开通 (volc.bigasr.auc_turbo)。注意标准版与极速版是分开的资源，开通标准版不包含极速版";
-            fail([NSString stringWithFormat:@"识别错误(%@): %@", apiCode, hint]);
+        NSString *apiCode = AWECAASRHeader(http.allHeaderFields, @"X-Api-Status-Code");
+        if (!apiCode.length) {
+            done(nil, nil, @"识别响应异常（无状态码）");
             return;
         }
-        if (!data.length) {
-            fail(@"识别无响应");
-            return;
+        NSDictionary *json = nil;
+        if (data.length) {
+            id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([obj isKindOfClass:[NSDictionary class]]) json = obj;
         }
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if (![json isKindOfClass:[NSDictionary class]]) {
-            fail(@"识别响应解析失败");
-            return;
-        }
-        NSInteger code = [json[@"code"] integerValue];
-        if (json[@"code"] && code != 0 && code != 20000000 && code != 3000) {
-            NSString *msg = json[@"message"] ?: json[@"msg"] ?: @"识别失败";
-            if (code == 45000030) msg = @"语音识别极速版未开通：火山控制台「服务管理」→ 录音文件识别2.0 → 预配置 → 选「极速版」标签 → 试用/开通 (volc.bigasr.auc_turbo)。注意标准版与极速版是分开的资源";
-            fail([NSString stringWithFormat:@"识别错误(%ld): %@", (long)code, msg]);
-            return;
-        }
-        NSString *text = [self textFromASRJSON:json];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(text.length ? text : nil, text.length ? nil : @"未识别到文字");
-        });
+        done(json, apiCode, nil);
     }] resume];
 }
 
