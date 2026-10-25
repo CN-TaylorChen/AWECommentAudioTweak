@@ -13,6 +13,8 @@
 @class AWECommentAudioPlayerManager;
 @class AWECommentAudioRecorder;
 @class AWECommentAudioRecorderController;
+@class AWEIMAudioRecordController;
+@class AWEIMDNewInputViewController;
 @class AWECommentLongPressPanelParam;
 @class AWECommentLongPressPanelCommonModel;
 @class AWECommentLongPressPanelBizParam;
@@ -88,6 +90,25 @@
 - (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 error:(id)arg3;
 - (void)audioRecorderStartRecord:(id)arg1 error:(id)arg2;
 - (void)clear;
+@end
+
+// 私聊（IM）录音控制（IPA 40.8.0 确认：AWEIMAudioRecordController，链路与评论区同构）
+
+@interface AWEIMAudioRecordController : NSObject
+@property (copy, nonatomic) NSString *recordFilePath;
+@property (strong, nonatomic) id recorder;
+@property (weak, nonatomic) id delegate;
+- (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 action:(NSInteger)arg3 error:(id)arg4;
+- (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 error:(id)arg3;
+@end
+
+// 私聊输入 VC（实现 AWEIMAudioInputTouchViewDelegate 触摸事件）
+
+@interface AWEIMDNewInputViewController : NSObject
+- (void)audioInputTouchViewTouchDownInside:(id)arg1;
+- (void)audioInputTouchViewTouchUpInside:(id)arg1 cancelled:(BOOL)arg2;
+- (void)audioInputTouchViewTouchUpInside:(id)arg1 cancelled:(BOOL)arg2 isInTranslate:(BOOL)arg3;
+- (void)audioInputTouchViewTouchUpOutside:(id)arg1 cancelled:(BOOL)arg2;
 @end
 
 // 长按菜单
