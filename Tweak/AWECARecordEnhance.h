@@ -18,6 +18,8 @@
 // 私聊（IM）场景转语音开关，与评论区各自独立
 @property (nonatomic, assign) BOOL privateEnhanceEnabled;
 @property (nonatomic, assign, readonly) BOOL armed;
+// 私聊录音进行中标记（与评论区 armed 相互独立）
+@property (nonatomic, assign, readonly) BOOL privateArmed;
 // 最近一次「取消录制」的时间戳（NSDate reference 时间；0 = 从未取消或已开新录音）。
 // 钩子用它识别「取消后紧跟的 DidFinishRecording 残留」——抖音取消时也会以 success:YES 回调。
 // 这是状态标记而非时间窗口：取消后持续有效，直到下一次 markCommentTakeStarted 清零。
