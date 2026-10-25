@@ -138,10 +138,13 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 // 私聊场景：armed 独立于评论区，取消作废逻辑完全复用（评论区与私聊 UI 互斥，同一时刻只会有一个在录音）
 - (void)markPrivateTakeStarted {
     self.privateArmed = YES;
+    self.privateRecordPath = nil;
+    self.privateSkipOnce = NO;
 }
 
 - (void)markPrivateTakeCancelled {
     self.privateArmed = NO;
+    self.privateRecordPath = nil;
     [self invalidatePipeline:@"已取消，保留原声"];
 }
 
@@ -177,7 +180,22 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 }
 
 - (BOOL)shouldRunForPrivateRecording {
-    return self.privateEnhanceEnabled && self.privateArmed && [self hasVolcanoCredentials];
+    BOOL ok = self.privateEnhanceEnabled && self.privateArmed && self.privateRecordPath.length && [self hasVolcanoCredentials];
+    NSLog(@"AWECA-IM: shouldRun enabled=%d armed=%d pathLen=%lu cred=%d -> %d",
+          self.privateEnhanceEnabled, self.privateArmed,
+          (unsigned long)self.privateRecordPath.length, [self hasVolcanoCredentials], ok);
+    return ok;
+}
+
+// 私聊发送时机：跑完整流水线（TOS上传→ASR→TTS→替换），完成后回调才有结果可发
+- (void)runPrivateEnhanceAtPath:(NSString *)path
+                     completion:(void(^)(BOOL ok, NSString *message))completion {
+    [self waitForEnhancedPath:path completion:completion];
+}
+
+- (void)resetPrivateTake {
+    self.privateArmed = NO;
+    self.privateRecordPath = nil;
 }
 
 - (BOOL)shouldSkipStickyReplaceForPath:(NSString *)path {
