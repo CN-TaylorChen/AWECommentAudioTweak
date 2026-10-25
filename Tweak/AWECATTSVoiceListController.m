@@ -259,7 +259,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     NSInteger idx = [(voice[@"color"] ?: @0) integerValue];
     if (idx < 0 || idx >= (NSInteger)palette.count) idx = 3;
     [palette[idx] setFill];
-    [UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, sz, sz)].fill;
+    UIBezierPath *oval = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, sz, sz)];
+    [oval fill];
     NSString *text = [voice[@"avatar"] isKindOfClass:[NSString class]] && ((NSString *)voice[@"avatar"]).length
         ? voice[@"avatar"]
         : ([voice[@"name"] length] ? [voice[@"name"] substringToIndex:1] : @"♪");
@@ -293,7 +294,6 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         cell.imageView.layer.masksToBounds = YES;
         cell.textLabel.text = name;
         cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
-        cell.detailTextLabel = nil;
     } else {
         cell.textLabel.text = [NSString stringWithFormat:@"%@  %@", name, type];
         cell.textLabel.font = [UIFont systemFontOfSize:14];
