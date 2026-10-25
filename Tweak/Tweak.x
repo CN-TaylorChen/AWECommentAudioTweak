@@ -344,11 +344,27 @@ static BOOL AWECAPrivateGate(const char *tag, NSString *path, void (^fire)(BOOL 
 @end
 
 // ===== 新面板触摸层：UI 事件入口（40.8.0 私聊实际走这条）=====
+// 注意：头文件里该类只是 NSObject 前向声明，UIView 属性一律经 id 桥接访问；
+// 新增方法必须 %new，钩子内经 objc_msgSend 调用（编译器看不到选择器声明）
+
+static void AWECAIMPillSync(id touchView) {
+    @try {
+        SEL ensure = @selector(aweca_ensurePill);
+        if ([touchView respondsToSelector:ensure]) ((void(*)(id, SEL))objc_msgSend)(touchView, ensure);
+        SEL layout = @selector(aweca_layoutPill);
+        if ([touchView respondsToSelector:layout]) ((void(*)(id, SEL))objc_msgSend)(touchView, layout);
+    } @catch (NSException *e) {
+        NSLog(@"AWECA-IM: pill sync exception: %@", e);
+    }
+}
+
 %hook AWEIMOptimizeAudioInputTouchView
 
 // 状态条挂载：加到触摸层的父视图（兄弟节点），位于「按住说话」上方 34pt
+%new
 - (void)aweca_ensurePill {
-    UIView *host = self.superview;
+    UIView *me = (id)self;
+    UIView *host = me.superview;
     if (!host) return;
     AWECAIMSetPillButton *pill = (AWECAIMSetPillButton *)[host viewWithTag:kAWECIMSetTag];
     if (!pill) {
@@ -357,32 +373,34 @@ static BOOL AWECAPrivateGate(const char *tag, NSString *path, void (^fire)(BOOL 
         [host addSubview:pill];
     }
     [pill aweca_refreshPill];
-    pill.hidden = self.hidden || self.alpha < 0.05 || self.frame.size.width < 40;
+    pill.hidden = me.hidden || me.alpha < 0.05 || me.frame.size.width < 40;
 }
 
+%new
 - (void)aweca_layoutPill {
-    UIView *host = self.superview;
+    UIView *me = (id)self;
+    UIView *host = me.superview;
     if (!host) return;
     AWECAIMSetPillButton *pill = (AWECAIMSetPillButton *)[host viewWithTag:kAWECIMSetTag];
     if (!pill) return;
-    CGRect mine = [self convertRect:self.bounds toView:host];
+    CGRect mine = [me convertRect:me.bounds toView:host];
     CGFloat w = mine.size.width - 24;
     if (w < 120) w = host.bounds.size.width - 24;
     CGFloat x = (host.bounds.size.width - w) / 2;
     CGFloat y = mine.origin.y - 34;
     if (y < 2) y = 2;   // 上方空间不足时兜底，绝不悬浮到屏幕外
     pill.frame = CGRectMake(x, y, w, 30);
-    pill.hidden = self.hidden || self.alpha < 0.05 || self.frame.size.width < 40;
+    pill.hidden = me.hidden || me.alpha < 0.05 || me.frame.size.width < 40;
 }
 
 - (void)didMoveToSuperview {
     %orig;
-    @try { [self aweca_ensurePill]; } @catch (NSException *e) {}
+    AWECAIMPillSync(self);
 }
 
 - (void)layoutSubviews {
     %orig;
-    @try { [self aweca_ensurePill]; [self aweca_layoutPill]; } @catch (NSException *e) {}
+    AWECAIMPillSync(self);
 }
 
 // 手势开始：武装私聊场景（兜底，控制器 delegate 的 TouchDown 也会武装）
