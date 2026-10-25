@@ -395,7 +395,7 @@ static int aweca_mapPitchToV3(float ratio) {
             NSString *msg = @"服务错误";
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data ?: [NSData data] options:0 error:nil];
             if ([json isKindOfClass:[NSDictionary class]]) {
-                id m = json[@"message"] ?: json[@"detail"];
+                NSString *m = json[@"message"] ?: json[@"detail"];
                 if ([m isKindOfClass:[NSString class]] && m.length) msg = m;
             }
             if (!data.length) msg = @"服务器无响应";
