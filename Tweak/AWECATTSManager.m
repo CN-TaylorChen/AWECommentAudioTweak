@@ -4,6 +4,7 @@
 #import "AWECATTSManager.h"
 #import "AWECAUtils.h"
 #import "AWECAAudioReplacer.h"
+#import <UIKit/UIKit.h>
 #import <math.h>
 #import <string.h>
 
@@ -12,6 +13,8 @@
 #define kTTSV3UnidirURL @"https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 #define kTTSResourceTTS2 @"seed-tts-2.0"
 #define kTTSResourceICL2 @"seed-icl-2.0"
+
+#define kFishTTSURL     @"https://api.fish.audio/v1/tts"
 
 static NSString *AWECATrim(NSString *s) {
     if (![s isKindOfClass:[NSString class]]) return @"";
@@ -116,11 +119,20 @@ static NSArray<NSDictionary *> *AWECAJSONObjectsFromData(NSData *data) {
         return;
     }
 
+    if (self.fishEngine) {
+        [self synthesizeFishText:text previewOnly:previewOnly completion:completion];
+        return;
+    }
     [self synthesizeVolcanoV3Text:text previewOnly:previewOnly completion:completion];
 }
 
 - (void)synthesizeVolcanoPreviewText:(NSString *)text
                           completion:(void(^)(BOOL success, NSString *audioPath, NSString *error))completion {
+    // 流水线统一入口：按引擎分流（录音转音色 ASR 仍走火山，仅 TTS 分流）
+    if (self.fishEngine) {
+        [self synthesizeFishText:text previewOnly:NO completion:completion];
+        return;
+    }
     [self synthesizeVolcanoV3Text:text previewOnly:YES completion:completion];
 }
 
@@ -308,6 +320,151 @@ static int aweca_mapPitchToV3(float ratio) {
         }
         [self parseV3TTSResponse:data text:text previewOnly:previewOnly completion:completion];
     }] resume];
+}
+
+#pragma mark - FishAudio
+
+- (NSString *)fishEmotionPrefix {
+    NSMutableString *p = [NSMutableString string];
+    for (NSString *tag in self.fishEmotionSel) {
+        if (![tag isKindOfClass:[NSString class]] || !tag.length) continue;
+        [p appendFormat:@"%@ ", tag];
+    }
+    return p;
+}
+
+- (void)synthesizeFishText:(NSString *)text
+                previewOnly:(BOOL)previewOnly
+                 completion:(void(^)(BOOL success, NSString *audioPath, NSString *error))completion {
+    if (!text.length) {
+        if (completion) completion(NO, nil, @"请输入要合成的文字");
+        return;
+    }
+    NSString *key = AWECATrim(self.fishAPIKey);
+    if (!key.length) {
+        if (completion) completion(NO, nil, @"请先填写 FishAudio API Key");
+        return;
+    }
+    NSString *refID = AWECATrim(self.fishVoiceType);
+    if (!refID.length) {
+        if (completion) completion(NO, nil, @"请先选择 FishAudio 音色");
+        return;
+    }
+
+    // 情绪标签直接拼在文本前（s2.x 用 [tag]，s1 用 (tag)，由用户自行维护）
+    NSString *fullText = [[self fishEmotionPrefix] stringByAppendingString:text];
+    NSString *model = AWECATrim(self.fishModel);
+    if (!model.length) model = @"s2.1-pro";
+
+    NSMutableDictionary *body = [@{
+        @"text": fullText,
+        @"reference_id": refID,
+        @"format": @"mp3",
+        @"mp3_bitrate": @128,
+        @"chunk_length": @200,
+    } mutableCopy];
+    if ([model isEqualToString:@"s1"]) body[@"normalize"] = @YES;
+
+    NSError *jsonErr = nil;
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:&jsonErr];
+    if (jsonErr || !jsonData) {
+        if (completion) completion(NO, nil, @"请求构造失败");
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kFishTTSURL]];
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = jsonData;
+    request.timeoutInterval = 60;
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:[@"Bearer " stringByAppendingString:key] forHTTPHeaderField:@"Authorization"];
+    [request setValue:model forHTTPHeaderField:@"model"];
+
+    NSLog(@"AWECA-Fish: synthesize ref=%@ model=%@ len=%lu", refID, model, (unsigned long)fullText.length);
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(NO, nil, [NSString stringWithFormat:@"网络错误: %@", error.localizedDescription]);
+            });
+            return;
+        }
+        NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+        if (http.statusCode != 200 || !data.length) {
+            // 错误响应是 JSON：{"message": "..."}
+            NSString *msg = @"服务错误";
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data ?: [NSData data] options:0 error:nil];
+            if ([json isKindOfClass:[NSDictionary class]]) {
+                id m = json[@"message"] ?: json[@"detail"];
+                if ([m isKindOfClass:[NSString class]] && m.length) msg = m;
+            }
+            if (!data.length) msg = @"服务器无响应";
+            NSLog(@"AWECA-Fish: error %ld %@", (long)http.statusCode, msg);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(NO, nil, [NSString stringWithFormat:@"合成错误(%ld): %@", (long)http.statusCode, msg]);
+            });
+            return;
+        }
+        // 成功：响应体即 mp3 原始字节流
+        NSLog(@"AWECA-Fish: got audio %lu bytes", (unsigned long)data.length);
+        [self finishWithAudioData:data text:text previewOnly:previewOnly completion:completion];
+    }] resume];
+}
+
+#pragma mark - FishAudio 音色库与头像
+
++ (NSArray<NSDictionary *> *)fishVoices {
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kAWECFishVoices];
+    return saved ?: @[];
+}
+
++ (void)saveFishVoices:(NSArray<NSDictionary *> *)voices {
+    [[NSUserDefaults standardUserDefaults] setObject:voices ?: @[] forKey:kAWECFishVoices];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
++ (NSString *)fishAvatarDirPath {
+    NSString *dir = [[AWECAUtils audioSavePath] stringByAppendingPathComponent:@"fish_avatars"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return dir;
+}
+
+- (NSString *)fishAvatarPathForVoiceID:(NSString *)vid {
+    if (!vid.length) return nil;
+    NSString *safe = [vid stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+    return [[[AWECATTSManager fishAvatarDirPath] stringByAppendingPathComponent:safe] stringByAppendingPathExtension:@"jpg"];
+}
+
+- (UIImage *)fishAvatarForVoiceID:(NSString *)vid {
+    NSString *p = [self fishAvatarPathForVoiceID:vid];
+    if (!p || ![[NSFileManager defaultManager] fileExistsAtPath:p]) return nil;
+    return [UIImage imageWithContentsOfFile:p];
+}
+
+- (BOOL)saveFishAvatarImage:(UIImage *)image forVoiceID:(NSString *)vid {
+    NSString *p = [self fishAvatarPathForVoiceID:vid];
+    if (!p || !image) return NO;
+    // 中心正方形裁剪
+    CGFloat side = MIN(image.size.width, image.size.height);
+    CGRect crop = CGRectMake((image.size.width - side) / 2.0, (image.size.height - side) / 2.0, side, side);
+    CGImageRef cg = CGImageCreateWithImageInRect(image.CGImage, crop);
+    if (!cg) return NO;
+    UIImage *square = [UIImage imageWithCGImage:cg scale:image.scale orientation:image.imageOrientation];
+    CGImageRelease(cg);
+    // 压缩到 256x256 JPEG
+    CGSize target = CGSizeMake(256, 256);
+    UIGraphicsBeginImageContextWithOptions(target, NO, 1.0);
+    [square drawInRect:CGRectMake(0, 0, target.width, target.height)];
+    UIImage *resized = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(resized, 0.82);
+    if (!jpeg.length) return NO;
+    return [jpeg writeToFile:p atomically:YES];
+}
+
+- (void)deleteFishAvatarForVoiceID:(NSString *)vid {
+    NSString *p = [self fishAvatarPathForVoiceID:vid];
+    if (p) [[NSFileManager defaultManager] removeItemAtPath:p error:nil];
 }
 
 #pragma mark - 解析响应
@@ -541,6 +698,13 @@ static int aweca_mapPitchToV3(float ratio) {
     [d setObject:[AWECATTSManager canonicalDialect:self.explicitDialect] forKey:kAWECATTSDialect];
     [d setInteger:self.silenceDurationMs forKey:kAWECATTSSilenceMs];
     if (self.lastSynthesizedPath) [d setObject:self.lastSynthesizedPath forKey:kAWECATTSLastPath];
+    [d setBool:self.fishEngine forKey:kAWECATTSEngine];
+    [d setObject:self.fishAPIKey ?: @"" forKey:kAWECFishAPIKey];
+    [d setObject:self.fishModel ?: @"s2.1-pro" forKey:kAWECFishModel];
+    [d setObject:self.fishVoiceType ?: @"" forKey:kAWECFishVoiceType];
+    [d setObject:self.fishVoiceName ?: @"" forKey:kAWECFishVoiceName];
+    [d setObject:self.fishEmotionSel ?: @[] forKey:kAWECFishEmotionSel];
+    [d setObject:self.fishEmotionAll ?: @[] forKey:kAWECFishEmotionAll];
     [d synchronize];
 }
 
@@ -564,6 +728,16 @@ static int aweca_mapPitchToV3(float ratio) {
     self.silenceDurationMs = [d integerForKey:kAWECATTSSilenceMs];
 
     self.lastSynthesizedPath = [d objectForKey:kAWECATTSLastPath];
+
+    self.fishEngine = [d boolForKey:kAWECATTSEngine];
+    self.fishAPIKey = AWECATrim([d objectForKey:kAWECFishAPIKey]);
+    self.fishModel = [d objectForKey:kAWECFishModel] ?: @"s2.1-pro";
+    self.fishVoiceType = [d objectForKey:kAWECFishVoiceType];
+    self.fishVoiceName = [d objectForKey:kAWECFishVoiceName];
+    id selEmo = [d objectForKey:kAWECFishEmotionSel];
+    self.fishEmotionSel = [selEmo isKindOfClass:[NSArray class]] ? selEmo : @[];
+    id allEmo = [d objectForKey:kAWECFishEmotionAll];
+    self.fishEmotionAll = [allEmo isKindOfClass:[NSArray class]] ? allEmo : @[];
 }
 
 @end

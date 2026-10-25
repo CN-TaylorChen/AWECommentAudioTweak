@@ -12,6 +12,7 @@
 #import "AWECAUtils.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <SafariServices/SafariServices.h>
+#import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <math.h>
@@ -60,13 +61,24 @@ static NSString *const kVoiceAvatarB64 = @"iVBORw0KGgoAAAANSUhEUgAAAIQAAACECAYAA
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *items;
 @end
 
-@interface AWECAAudioPickerController () <UITableViewDelegate, UITableViewDataSource>
+@interface AWECAAudioPickerController () <UITableViewDelegate, UITableViewDataSource, PHPickerViewControllerDelegate>
 @property (nonatomic, strong) NSMutableArray<NSString *> *favorites;
 @property (nonatomic, assign) NSInteger tabIndex;
 @property (nonatomic, strong) UISegmentedControl *segment;
 @property (nonatomic, strong) UIView *synPanel;
 @property (nonatomic, strong) UIView *locPanel;
 @property (nonatomic, strong) UILabel *headerTitleLabel;
+@property (nonatomic, strong) UILabel *headerSubLabel;
+// 引擎切换（火山 / FishAudio）与 FishAudio 分组
+@property (nonatomic, strong) UISegmentedControl *engineSeg;
+@property (nonatomic, strong) UIView *volcanoCard;
+@property (nonatomic, strong) UIView *fishCard;
+@property (nonatomic, strong) UIImageView *fishAvatarView;
+@property (nonatomic, strong) UILabel *fishNameLabel;
+@property (nonatomic, strong) UILabel *fishSubLabel;
+@property (nonatomic, strong) UISegmentedControl *modelSeg;
+@property (nonatomic, strong) UIScrollView *emotionScroll;
+@property (nonatomic, copy) NSString *pendingAvatarVoiceID;
 @property (nonatomic, strong) UILabel *voiceNameLabel;
 @property (nonatomic, strong) UIImageView *avatarView;
 @property (nonatomic, strong) UIButton *previewBtn;
@@ -286,6 +298,8 @@ static UIColor *AWECAOnPrimary(void) {
     BOOL light = AWECADouyinIsLight();
     self.view.backgroundColor = AWECAPageBG();
     self.headerTitleLabel.textColor = label;
+    self.headerSubLabel.textColor = AWECATertiary();
+    self.fishNameLabel.textColor = label;
     [self aweca_recolorTree:self.view];
     self.toneField.backgroundColor = AWECASoftFill();
     self.toneField.textColor = label;
@@ -328,6 +342,7 @@ static UIColor *AWECAOnPrimary(void) {
         bar.tintColor = label;
     }
     [self aweca_paintDialect];
+    [self aweca_paintEmotionChips];
     [self.favTable reloadData];
 }
 
@@ -366,7 +381,7 @@ static UIColor *AWECAOnPrimary(void) {
 - (void)aweca_buildUI {
     const CGFloat titlePad = 12.0;
     UILabel *titleLab = [[UILabel alloc] init];
-    titleLab.text = @"Developed by CookieOdd";
+    titleLab.text = [NSString stringWithFormat:@"%@ v%@", AWECAProductName, AWECAVersion];
     titleLab.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     titleLab.textColor = [UIColor labelColor];
     titleLab.textAlignment = NSTextAlignmentCenter;
@@ -375,6 +390,15 @@ static UIColor *AWECAOnPrimary(void) {
     titleLab.translatesAutoresizingMaskIntoConstraints = NO;
     self.headerTitleLabel = titleLab;
     [self.view addSubview:titleLab];
+
+    UILabel *subLab = [[UILabel alloc] init];
+    subLab.text = @"原作 CookieOdd · 二创 CN-TaylorChen";
+    subLab.font = [UIFont systemFontOfSize:10];
+    subLab.textColor = [UIColor tertiaryLabelColor];
+    subLab.textAlignment = NSTextAlignmentCenter;
+    subLab.translatesAutoresizingMaskIntoConstraints = NO;
+    self.headerSubLabel = subLab;
+    [self.view addSubview:subLab];
 
     UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"合成", @"本地"]];
     seg.selectedSegmentIndex = 0;
@@ -410,7 +434,10 @@ static UIColor *AWECAOnPrimary(void) {
         [titleLab.topAnchor constraintGreaterThanOrEqualToAnchor:self.view.topAnchor constant:28],
         [titleLab.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [titleLab.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [seg.topAnchor constraintEqualToAnchor:titleLab.bottomAnchor constant:titlePad],
+        [subLab.topAnchor constraintEqualToAnchor:titleLab.bottomAnchor constant:2],
+        [subLab.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [subLab.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [seg.topAnchor constraintEqualToAnchor:subLab.bottomAnchor constant:titlePad],
         [seg.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [seg.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
         [scroll.topAnchor constraintEqualToAnchor:seg.bottomAnchor constant:12],
@@ -431,7 +458,17 @@ static UIColor *AWECAOnPrimary(void) {
     col.spacing = 12;
     col.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // 合成引擎切换：火山 / FishAudio
+    UISegmentedControl *eseg = [[UISegmentedControl alloc] initWithItems:@[@"火山引擎", @"FishAudio"]];
+    eseg.selectedSegmentIndex = [AWECATTSManager shared].fishEngine ? 1 : 0;
+    eseg.translatesAutoresizingMaskIntoConstraints = NO;
+    [eseg addTarget:self action:@selector(aweca_engineChanged:) forControlEvents:UIControlEventValueChanged];
+    [eseg.heightAnchor constraintEqualToConstant:32].active = YES;
+    self.engineSeg = eseg;
+    [col addArrangedSubview:eseg];
+
     UIView *card = [self aweca_card];
+    self.volcanoCard = card;
     UIStackView *inner = [[UIStackView alloc] init];
     inner.axis = UILayoutConstraintAxisVertical;
     inner.spacing = 0;
@@ -460,6 +497,9 @@ static UIColor *AWECAOnPrimary(void) {
     [inner addArrangedSubview:[self aweca_buildTone]];
     [inner addArrangedSubview:[self aweca_buildDialect]];
     [col addArrangedSubview:card];
+
+    // FishAudio 分组（引擎切到 FishAudio 时显示）
+    [col addArrangedSubview:[self aweca_buildFishCard]];
 
     UIView *en = [self aweca_card];
     UIStackView *enRow = [[UIStackView alloc] init];
@@ -540,7 +580,378 @@ static UIColor *AWECAOnPrimary(void) {
     [cta addTarget:self action:@selector(aweca_pushCompose) forControlEvents:UIControlEventTouchUpInside];
     self.composeBtn = cta;
     [col addArrangedSubview:cta];
+
+    [self aweca_updateEngineVisibility];
     return col;
+}
+
+#pragma mark - FishAudio 分组
+
+- (UIView *)aweca_buildFishCard {
+    UIView *card = [self aweca_card];
+    self.fishCard = card;
+    UIStackView *inner = [[UIStackView alloc] init];
+    inner.axis = UILayoutConstraintAxisVertical;
+    inner.spacing = 0;
+    inner.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:inner];
+    [NSLayoutConstraint activateConstraints:@[
+        [inner.topAnchor constraintEqualToAnchor:card.topAnchor constant:6],
+        [inner.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-10],
+        [inner.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [inner.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+    ]];
+
+    // 音色行：圆头像 + 名称 + 试听（点整行进音色库，点头像换图）
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [row.heightAnchor constraintEqualToConstant:72].active = YES;
+
+    UIImageView *av = [[UIImageView alloc] init];
+    av.contentMode = UIViewContentModeScaleAspectFill;
+    av.layer.cornerRadius = 22;
+    av.layer.masksToBounds = YES;
+    av.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fishAvatarView = av;
+    [row addSubview:av];
+
+    UILabel *name = [[UILabel alloc] init];
+    name.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+    name.textColor = [UIColor labelColor];
+    name.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fishNameLabel = name;
+    [row addSubview:name];
+    UILabel *sub = [self aweca_label:@"点击更换音色 · 点头像自定义图片" size:12 color:[UIColor tertiaryLabelColor]];
+    [row addSubview:sub];
+
+    UIButton *preview = [UIButton buttonWithType:UIButtonTypeSystem];
+    [preview setTitle:@"试听" forState:UIControlStateNormal];
+    preview.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    [preview setTitleColor:[UIColor systemBackgroundColor] forState:UIControlStateNormal];
+    preview.backgroundColor = [UIColor labelColor];
+    preview.tag = kAWECAInvertBtnTag;
+    preview.layer.cornerRadius = 16;
+    preview.translatesAutoresizingMaskIntoConstraints = NO;
+    [preview addTarget:self action:@selector(aweca_fishPreview) forControlEvents:UIControlEventTouchUpInside];
+    [row addSubview:preview];
+
+    UIButton *hit = [UIButton buttonWithType:UIButtonTypeSystem];
+    hit.translatesAutoresizingMaskIntoConstraints = NO;
+    [hit addTarget:self action:@selector(aweca_pushFishVoiceList) forControlEvents:UIControlEventTouchUpInside];
+    [row insertSubview:hit atIndex:0];
+    UITapGestureRecognizer *avTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_fishAvatarTapped)];
+    [av addGestureRecognizer:avTap];
+    av.userInteractionEnabled = YES;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [av.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:16],
+        [av.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [av.widthAnchor constraintEqualToConstant:44],
+        [av.heightAnchor constraintEqualToConstant:44],
+        [preview.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-14],
+        [preview.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [preview.widthAnchor constraintEqualToConstant:64],
+        [preview.heightAnchor constraintEqualToConstant:32],
+        [name.leadingAnchor constraintEqualToAnchor:av.trailingAnchor constant:12],
+        [name.topAnchor constraintEqualToAnchor:av.topAnchor constant:4],
+        [name.trailingAnchor constraintLessThanOrEqualToAnchor:preview.leadingAnchor constant:-8],
+        [sub.leadingAnchor constraintEqualToAnchor:name.leadingAnchor],
+        [sub.topAnchor constraintEqualToAnchor:name.bottomAnchor constant:2],
+        [hit.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [hit.trailingAnchor constraintEqualToAnchor:preview.leadingAnchor],
+        [hit.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [hit.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+    ]];
+    [inner addArrangedSubview:row];
+
+    // 模型选择：s2.1-pro / s2-pro / s1
+    UISegmentedControl *mseg = [[UISegmentedControl alloc] initWithItems:@[@"s2.1-pro", @"s2-pro", @"s1"]];
+    NSString *curModel = [AWECATTSManager shared].fishModel ?: @"s2.1-pro";
+    mseg.selectedSegmentIndex = [curModel isEqualToString:@"s1"] ? 2 : ([curModel isEqualToString:@"s2-pro"] ? 1 : 0);
+    mseg.translatesAutoresizingMaskIntoConstraints = NO;
+    [mseg addTarget:self action:@selector(aweca_modelChanged:) forControlEvents:UIControlEventValueChanged];
+    self.modelSeg = mseg;
+    UIView *modelWrap = [[UIView alloc] init];
+    modelWrap.translatesAutoresizingMaskIntoConstraints = NO;
+    [modelWrap addSubview:mseg];
+    [NSLayoutConstraint activateConstraints:@[
+        [modelWrap.heightAnchor constraintEqualToConstant:52],
+        [mseg.leadingAnchor constraintEqualToAnchor:modelWrap.leadingAnchor constant:16],
+        [mseg.trailingAnchor constraintEqualToAnchor:modelWrap.trailingAnchor constant:-16],
+        [mseg.centerYAnchor constraintEqualToAnchor:modelWrap.centerYAnchor],
+        [mseg.heightAnchor constraintEqualToConstant:32],
+    ]];
+    [inner addArrangedSubview:modelWrap];
+
+    // 情绪标签（多选，横向滚动）
+    UIView *emoBox = [[UIView alloc] init];
+    emoBox.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *emoLab = [self aweca_label:@"情绪标签（可多选，拼在识别文字前）" size:13 color:[UIColor tertiaryLabelColor]];
+    UIScrollView *escroll = [[UIScrollView alloc] init];
+    escroll.showsHorizontalScrollIndicator = NO;
+    escroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.emotionScroll = escroll;
+    [emoBox addSubview:emoLab];
+    [emoBox addSubview:escroll];
+    [NSLayoutConstraint activateConstraints:@[
+        [emoBox.heightAnchor constraintEqualToConstant:56],
+        [emoLab.leadingAnchor constraintEqualToAnchor:emoBox.leadingAnchor constant:16],
+        [emoLab.topAnchor constraintEqualToAnchor:emoBox.topAnchor constant:6],
+        [escroll.leadingAnchor constraintEqualToAnchor:emoBox.leadingAnchor constant:12],
+        [escroll.trailingAnchor constraintEqualToAnchor:emoBox.trailingAnchor constant:-12],
+        [escroll.topAnchor constraintEqualToAnchor:emoLab.bottomAnchor constant:4],
+        [escroll.bottomAnchor constraintEqualToAnchor:emoBox.bottomAnchor constant:-6],
+    ]];
+    [inner addArrangedSubview:emoBox];
+
+    UILabel *hint = [self aweca_label:@"s2.x 情绪用方括号如 [chuckle]；s1 用圆括号如 (angry)" size:11 color:[UIColor tertiaryLabelColor]];
+    hint.numberOfLines = 0;
+    UIView *hintWrap = [[UIView alloc] init];
+    hintWrap.translatesAutoresizingMaskIntoConstraints = NO;
+    [hintWrap addSubview:hint];
+    [NSLayoutConstraint activateConstraints:@[
+        [hintWrap.heightAnchor constraintEqualToConstant:24],
+        [hint.leadingAnchor constraintEqualToAnchor:hintWrap.leadingAnchor constant:16],
+        [hint.trailingAnchor constraintEqualToAnchor:hintWrap.trailingAnchor constant:-16],
+        [hint.centerYAnchor constraintEqualToAnchor:hintWrap.centerYAnchor],
+    ]];
+    [inner addArrangedSubview:hintWrap];
+    return card;
+}
+
+- (void)aweca_updateEngineVisibility {
+    BOOL fish = [AWECATTSManager shared].fishEngine;
+    self.volcanoCard.hidden = fish;
+    self.fishCard.hidden = !fish;
+}
+
+- (void)aweca_engineChanged:(UISegmentedControl *)seg {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    mgr.fishEngine = (seg.selectedSegmentIndex == 1);
+    [mgr saveConfig];
+    [self aweca_updateEngineVisibility];
+    [self aweca_refreshFishUI];
+    [AWECAUtils showToast:mgr.fishEngine ? @"已切换到 FishAudio" : @"已切换到火山引擎"];
+}
+
+- (void)aweca_modelChanged:(UISegmentedControl *)seg {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    mgr.fishModel = @[ @"s2.1-pro", @"s2-pro", @"s1" ][seg.selectedSegmentIndex];
+    [mgr saveConfig];
+}
+
+- (void)aweca_pushFishVoiceList {
+    [self aweca_showNavForPush];
+    AWECATTSVoiceListController *vc = [[AWECATTSVoiceListController alloc] init];
+    vc.fishMode = YES;
+    __weak typeof(self) weakSelf = self;
+    vc.onVoiceSelected = ^(NSString *type, NSString *name) {
+        [weakSelf aweca_refreshFishUI];
+    };
+    [self.navigationController pushViewController:vc animated:YES];
+}
+
+- (void)aweca_refreshFishUI {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    self.fishNameLabel.text = mgr.fishVoiceName.length ? mgr.fishVoiceName : @"未选择音色";
+    UIImage *img = [mgr fishAvatarForVoiceID:mgr.fishVoiceType];
+    if (img) {
+        self.fishAvatarView.image = img;
+        self.fishAvatarView.backgroundColor = [UIColor tertiarySystemFillColor];
+    } else {
+        // 默认：名称首字 + 品牌蓝
+        self.fishAvatarView.image = nil;
+        self.fishAvatarView.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1];
+        self.fishAvatarView.layer.cornerRadius = 22;
+    }
+    [self aweca_paintEmotionChips];
+}
+
+- (void)aweca_fishPreview {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    if (!mgr.fishVoiceType.length) { [AWECAUtils showToast:@"请先选择 FishAudio 音色"]; return; }
+    [AWECAUtils showToast:@"试听合成中..."];
+    [mgr synthesizeFishText:@"你好，这是当前音色的试听。" previewOnly:YES completion:^(BOOL ok, NSString *path, NSString *err) {
+        if (ok && path.length) {
+            [[AWECATTSManager shared] playAudioAtPath:path];
+        } else {
+            [AWECAUtils showToast:err.length ? err : @"试听失败"];
+        }
+    }];
+}
+
+- (void)aweca_fishAvatarTapped {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    if (!mgr.fishVoiceType.length) { [AWECAUtils showToast:@"请先选择 FishAudio 音色"]; return; }
+    self.pendingAvatarVoiceID = mgr.fishVoiceType;
+    [self aweca_presentPhotoPicker];
+}
+
+#pragma mark - 情绪标签
+
+- (void)aweca_paintEmotionChips {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    NSArray *all = mgr.fishEmotionAll;
+    UIView *content = self.emotionScroll.subviews.firstObject;
+    for (UIView *v in content.subviews) [v removeFromSuperview];
+    BOOL dark = !AWECADouyinIsLight();
+
+    CGFloat x = 4, y = 2;
+    CGFloat maxW = CGRectGetWidth(self.emotionScroll.bounds);
+    if (maxW <= 1) maxW = 300;
+    for (NSInteger i = 0; i < (NSInteger)all.count; i++) {
+        NSString *tag = all[i];
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        [b setTitle:tag forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont systemFontOfSize:12];
+        b.layer.cornerRadius = 13;
+        b.contentEdgeInsets = UIEdgeInsetsMake(4, 10, 4, 10);
+        [b sizeToFit];
+        CGSize fits = [b.titleLabel.text sizeWithAttributes:@{NSFontAttributeName: b.titleLabel.font}];
+        CGFloat w = fits.width + 22, h = 26;
+        if (x + w > maxW - 8 && x > 4) { x = 4; y += h + 6; }
+        b.frame = CGRectMake(x, y, w, h);
+        b.tag = 9500 + i;
+        [b addTarget:self action:@selector(aweca_emotionTapped:) forControlEvents:UIControlEventTouchUpInside];
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_emotionLongPress:)];
+        [b addGestureRecognizer:lp];
+        [content addSubview:b];
+        x += w + 6;
+    }
+    // ＋ 添加标签
+    UIButton *add = [UIButton buttonWithType:UIButtonTypeSystem];
+    [add setTitle:@"＋ 添加" forState:UIControlStateNormal];
+    add.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    add.layer.cornerRadius = 13;
+    add.layer.borderWidth = 1;
+    add.layer.borderColor = [UIColor tertiaryLabelColor].CGColor;
+    add.contentEdgeInsets = UIEdgeInsetsMake(4, 10, 4, 10);
+    [add setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+    CGSize fs = [add.titleLabel.text sizeWithAttributes:@{NSFontAttributeName: add.titleLabel.font}];
+    CGFloat aw = fs.width + 22;
+    if (x + aw > maxW - 8 && x > 4) { x = 4; y += 32; }
+    add.frame = CGRectMake(x, y, aw, 26);
+    [add addTarget:self action:@selector(aweca_addEmotion) forControlEvents:UIControlEventTouchUpInside];
+    [content addSubview:add];
+    y += 32;
+
+    content.frame = CGRectMake(0, 0, maxW, y);
+    self.emotionScroll.contentSize = CGSizeMake(maxW, y);
+    self.emotionScroll.scrollEnabled = (y > CGRectGetHeight(self.emotionScroll.bounds));
+
+    // 选中态上色
+    for (UIView *v in content.subviews) {
+        if (![v isKindOfClass:[UIButton class]] || v.tag < 9500) continue;
+        UIButton *b = (UIButton *)v;
+        NSString *tag = all[v.tag - 9500];
+        BOOL sel = [mgr.fishEmotionSel containsObject:tag];
+        if (sel) {
+            b.backgroundColor = AWECALabel();
+            [b setTitleColor:AWECAOnPrimary() forState:UIControlStateNormal];
+            b.layer.borderWidth = 0;
+        } else {
+            b.backgroundColor = AWECASoftFill();
+            [b setTitleColor:dark ? [UIColor colorWithWhite:0.73 alpha:1] : [UIColor colorWithWhite:0.27 alpha:1] forState:UIControlStateNormal];
+            b.layer.borderWidth = 0;
+        }
+    }
+}
+
+- (void)aweca_emotionTapped:(UIButton *)btn {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    NSInteger i = btn.tag - 9500;
+    if (i < 0 || i >= (NSInteger)mgr.fishEmotionAll.count) return;
+    NSString *tag = mgr.fishEmotionAll[i];
+    NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
+    if ([sel containsObject:tag]) [sel removeObject:tag];
+    else [sel addObject:tag];
+    mgr.fishEmotionSel = sel;
+    [mgr saveConfig];
+    [self aweca_paintEmotionChips];
+}
+
+- (void)aweca_emotionLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    UIButton *btn = (UIButton *)gr.view;
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    NSInteger i = btn.tag - 9500;
+    if (i < 0 || i >= (NSInteger)mgr.fishEmotionAll.count) return;
+    NSString *tag = mgr.fishEmotionAll[i];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:tag message:@"删除该情绪标签？" preferredStyle:UIAlertControllerStyleActionSheet];
+    [ac addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
+        NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
+        [all removeObject:tag];
+        [sel removeObject:tag];
+        mgr.fishEmotionAll = all;
+        mgr.fishEmotionSel = sel;
+        [mgr saveConfig];
+        [self aweca_paintEmotionChips];
+    }]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    if (ac.popoverPresentationController) {
+        ac.popoverPresentationController.sourceView = btn;
+        ac.popoverPresentationController.sourceRect = btn.bounds;
+    }
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)aweca_addEmotion {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"添加情绪标签"
+        message:@"s2.x 模型用方括号如 [chuckle] [whisper]；s1 用圆括号如 (angry)。留括号由你输入，插件原样拼接。"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"例如 [laugh] 或 (excited)";
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *tag = [ac.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!tag.length) return;
+        AWECATTSManager *mgr = [AWECATTSManager shared];
+        NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
+        if (![all containsObject:tag]) [all addObject:tag];
+        mgr.fishEmotionAll = all;
+        NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
+        if (![sel containsObject:tag]) [sel addObject:tag];
+        mgr.fishEmotionSel = sel;
+        [mgr saveConfig];
+        [self aweca_paintEmotionChips];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+#pragma mark - 头像图片选择（PHPicker）
+
+- (void)aweca_presentPhotoPicker {
+    PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
+    cfg.filter = [PHPickerFilter imagesFilter];
+    cfg.selectionLimit = 1;
+    PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:cfg];
+    picker.delegate = self;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    NSString *vid = self.pendingAvatarVoiceID;
+    self.pendingAvatarVoiceID = nil;
+    if (!vid.length || results.count == 0) return;
+    NSItemProvider *provider = results.firstObject.itemProvider;
+    if (![provider canLoadObjectOfClass:[UIImage class]]) return;
+    __weak typeof(self) weakSelf = self;
+    [provider loadObjectOfClass:[UIImage class] completionHandler:^(__kindof id<NSItemProviderReading> obj, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![obj isKindOfClass:[UIImage class]]) {
+                [AWECAUtils showToast:@"读取图片失败"];
+                return;
+            }
+            BOOL ok = [[AWECATTSManager shared] saveFishAvatarImage:(UIImage *)obj forVoiceID:vid];
+            [AWECAUtils showToast:ok ? @"头像已更新" : @"头像保存失败"];
+            [weakSelf aweca_refreshFishUI];
+        });
+    }];
 }
 
 - (UIView *)aweca_buildHero {
@@ -844,7 +1255,7 @@ static UIColor *AWECAOnPrimary(void) {
     AWECATTSManager *mgr = [AWECATTSManager shared];
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"API 凭证"
-                                                               message:@"合成：App ID + API Key\n录音转音色（标准版识别）：再填下方 TOS 上传配置（私有桶 + 预签名URL）"
+                                                               message:@"合成：App ID + API Key\nFishAudio：填下方 Fish Key（fish.audio → API Keys）\n录音转音色（标准版识别）：再填下方 TOS 上传配置（私有桶 + 预签名URL）"
                                                         preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"App ID";
@@ -856,6 +1267,13 @@ static UIColor *AWECAOnPrimary(void) {
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"API Key";
         tf.text = mgr.accessToken ?: @"";
+        tf.secureTextEntry = YES;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"FishAudio API Key";
+        tf.text = mgr.fishAPIKey ?: @"";
         tf.secureTextEntry = YES;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -898,12 +1316,13 @@ static UIColor *AWECAOnPrimary(void) {
         NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
         mgr.appID = [tfs[0].text stringByTrimmingCharactersInSet:ws];
         mgr.accessToken = [tfs[1].text stringByTrimmingCharactersInSet:ws];
+        mgr.fishAPIKey = [tfs[2].text stringByTrimmingCharactersInSet:ws];
         [mgr saveConfig];
-        [ud setObject:[tfs[2].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSAccessKey];
-        [ud setObject:[tfs[3].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSSecretKey];
-        [ud setObject:[tfs[4].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSBucket];
-        [ud setObject:[tfs[5].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSRegion];
-        [ud setObject:[tfs[6].text stringByTrimmingCharactersInSet:ws] forKey:kAWECAASRResourceId];
+        [ud setObject:[tfs[3].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSAccessKey];
+        [ud setObject:[tfs[4].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSSecretKey];
+        [ud setObject:[tfs[5].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSBucket];
+        [ud setObject:[tfs[6].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSRegion];
+        [ud setObject:[tfs[7].text stringByTrimmingCharactersInSet:ws] forKey:kAWECAASRResourceId];
         [ud synchronize];
         if ([AWECATOSUploader hasCredentials]) {
             [AWECAUtils showToast:@"已保存" duration:1.5];
@@ -924,8 +1343,15 @@ static UIColor *AWECAOnPrimary(void) {
 
 - (void)aweca_refreshUI {
     AWECATTSManager *mgr = [AWECATTSManager shared];
-    NSString *name = mgr.voiceName.length ? mgr.voiceName : @"知性灿灿 2.0";
+    BOOL fish = mgr.fishEngine;
+    NSString *name = fish
+        ? (mgr.fishVoiceName.length ? mgr.fishVoiceName : @"未选择音色")
+        : (mgr.voiceName.length ? mgr.voiceName : @"知性灿灿 2.0");
     self.voiceNameLabel.text = name;
+
+    self.engineSeg.selectedSegmentIndex = fish ? 1 : 0;
+    [self aweca_updateEngineVisibility];
+    [self aweca_refreshFishUI];
 
     float speed = mgr.speedRatio > 0.01f ? mgr.speedRatio : 1.0f;
     float vol = mgr.volumeRatio > 0.01f ? mgr.volumeRatio : 1.0f;

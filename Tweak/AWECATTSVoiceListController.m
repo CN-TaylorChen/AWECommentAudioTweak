@@ -5,6 +5,7 @@
 #import "AWECATTSManager.h"
 #import "AWECAUtils.h"
 #import <objc/runtime.h>
+#import <PhotosUI/PhotosUI.h>
 
 #define kAWECARecommendedVoices @"AWECARecommendedVoices"
 #define kAWECACustomVoices @"AWECACustomVoices"
@@ -18,7 +19,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 #define kCellFont [UIFont systemFontOfSize:15]
 
-@interface AWECATTSVoiceListController ()
+@interface AWECATTSVoiceListController () <UISearchBarDelegate, PHPickerViewControllerDelegate>
 @property (nonatomic, strong) UISearchBar *searchBar;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *customVoices;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *recommendedVoices;
@@ -27,6 +28,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 @property (nonatomic, strong) NSArray<NSDictionary *> *filteredRecommended;
 @property (nonatomic, strong) NSArray<NSDictionary *> *filteredAll;
 @property (nonatomic, copy) NSString *searchText;
+@property (nonatomic, copy) NSString *pendingAvatarVoiceID;   // 正在为哪个音色选图
 @end
 
 @implementation AWECATTSVoiceListController
@@ -42,19 +44,28 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [self loadCustomVoices];
     [self loadRecommended];
 
-    self.title = [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];
+    self.title = self.fishMode ? [NSString stringWithFormat:@"%@ · FishAudio 音色", AWECAProductName]
+                               : [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
 
     UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(addCustomVoice)];
     self.navigationItem.rightBarButtonItem = addBtn;
 
-    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
-    UILabel *verLabel = [[UILabel alloc] initWithFrame:footer.bounds];
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, self.fishMode ? 56 : 44)];
+    UILabel *verLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 20)];
     verLabel.text = [NSString stringWithFormat:@"%@ v%@ / CN-TaylorChen 维护", AWECAProductName, AWECAVersion];
     verLabel.textAlignment = NSTextAlignmentCenter;
     verLabel.font = [UIFont systemFontOfSize:12];
     verLabel.textColor = [UIColor secondaryLabelColor];
     [footer addSubview:verLabel];
+    if (self.fishMode) {
+        UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, 22, self.view.bounds.size.width, 20)];
+        hint.text = @"音色 ID 取自 fish.audio 音色详情页 · 长按音色可自定义头像图片";
+        hint.textAlignment = NSTextAlignmentCenter;
+        hint.font = [UIFont systemFontOfSize:11];
+        hint.textColor = [UIColor tertiaryLabelColor];
+        [footer addSubview:hint];
+    }
     self.tableView.tableFooterView = footer;
 
     UISearchBar *sb = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
@@ -76,19 +87,29 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 #pragma mark - 自定义音色持久化
 
 - (void)loadCustomVoices {
+    if (self.fishMode) {
+        self.customVoices = [[AWECATTSManager fishVoices] mutableCopy];
+        return;
+    }
     NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kAWECACustomVoices];
     self.customVoices = saved ? [saved mutableCopy] : [NSMutableArray array];
 }
 
 - (void)saveCustomVoices {
+    if (self.fishMode) {
+        [AWECATTSManager saveFishVoices:[self.customVoices copy]];
+        return;
+    }
     [[NSUserDefaults standardUserDefaults] setObject:[self.customVoices copy] forKey:kAWECACustomVoices];
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (void)addCustomVoice {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"添加音色"
-                                                                   message:@"填写火山引擎音色库中的音色 ID（复刻音色为 S_ 开头，商店/默认音色为 BV 或 zh_/en_ 开头）"
-                                                            preferredStyle:UIAlertControllerStyleAlert];
+        message:(self.fishMode
+            ? @"填写 fish.audio 音色库（或你克隆的声音）详情页的音色 ID（reference_id）"
+            : @"填写火山引擎音色库中的音色 ID（复刻音色为 S_ 开头，商店/默认音色为 BV 或 zh_/en_ 开头）")
+        preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"音色名称（如：我的复刻音色）";
     }];
@@ -195,19 +216,63 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     }
 }
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return AWECAVoiceSectionCount; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return self.fishMode ? 1 : AWECAVoiceSectionCount;
+}
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return [self listForSection:section].count;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    if (self.fishMode) return [NSString stringWithFormat:@"我的音色 (%lu) · 长按自定义头像", (unsigned long)self.filteredCustom.count];
     switch (section) {
         case AWECAVoiceSectionCustom: return [NSString stringWithFormat:@"我的音色 (%lu)", (unsigned long)self.filteredCustom.count];
         case AWECAVoiceSectionRecommended: return @"推荐音色";
         case AWECAVoiceSectionAll: return [NSString stringWithFormat:@"全部音色 (%lu)", (unsigned long)self.filteredAll.count];
         default: return nil;
     }
+}
+
+// 音色头像（圆）：优先自定义图片，否则 emoji/名称首字 + 底色
+- (UIImage *)aweca_avatarImageForVoice:(NSDictionary *)voice size:(CGFloat)sz {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    UIImage *img = [mgr fishAvatarForVoiceID:voice[@"voiceType"]];
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(sz, sz), NO, 0);
+    [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, sz, sz)] addClip];
+    if (img) {
+        [img drawInRect:CGRectMake(0, 0, sz, sz)];
+        UIImage *r = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        return r;
+    }
+    static NSArray<UIColor *> *palette;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        palette = @[[UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1],
+                    [UIColor colorWithRed:1.0 green:0.58 blue:0.0 alpha:1],
+                    [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1],
+                    [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1],
+                    [UIColor colorWithRed:0.69 green:0.32 blue:0.87 alpha:1],
+                    [UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1]];
+    });
+    NSInteger idx = [(voice[@"color"] ?: @0) integerValue];
+    if (idx < 0 || idx >= (NSInteger)palette.count) idx = 3;
+    [palette[idx] setFill];
+    [UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, sz, sz)].fill;
+    NSString *text = [voice[@"avatar"] isKindOfClass:[NSString class]] && ((NSString *)voice[@"avatar"]).length
+        ? voice[@"avatar"]
+        : ([voice[@"name"] length] ? [voice[@"name"] substringToIndex:1] : @"♪");
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.alignment = NSTextAlignmentCenter;
+    NSDictionary *attrs = @{NSFontAttributeName: [UIFont systemFontOfSize:sz * 0.42],
+                            NSForegroundColorAttributeName: [UIColor whiteColor],
+                            NSParagraphStyleAttributeName: ps};
+    CGRect tr = CGRectMake(0, (sz - sz * 0.42) / 2 - sz * 0.05, sz, sz * 0.6);
+    [text drawInRect:tr withAttributes:attrs];
+    UIImage *r = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return r;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -219,11 +284,21 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     NSString *name = voice[@"name"];
     NSString *type = voice[@"voiceType"];
 
-    cell.textLabel.text = [NSString stringWithFormat:@"%@  %@", name, type];
-    cell.textLabel.font = [UIFont systemFontOfSize:14];
-
     AWECATTSManager *mgr = [AWECATTSManager shared];
-    NSString *cur = mgr.voiceType.length > 0 ? mgr.voiceType : @"zh_female_cancan_uranus_bigtts";
+    NSString *cur = self.fishMode ? (mgr.fishVoiceType ?: @"") : (mgr.voiceType.length > 0 ? mgr.voiceType : @"zh_female_cancan_uranus_bigtts");
+
+    if (self.fishMode) {
+        cell.imageView.image = [self aweca_avatarImageForVoice:voice size:40];
+        cell.imageView.layer.cornerRadius = 20;
+        cell.imageView.layer.masksToBounds = YES;
+        cell.textLabel.text = name;
+        cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        cell.detailTextLabel = nil;
+    } else {
+        cell.textLabel.text = [NSString stringWithFormat:@"%@  %@", name, type];
+        cell.textLabel.font = [UIFont systemFontOfSize:14];
+    }
+
     if ([type isEqualToString:cur]) {
         cell.accessoryType = UITableViewCellAccessoryCheckmark;
     }
@@ -250,8 +325,13 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     NSDictionary *voice = [self listForSection:indexPath.section][indexPath.row];
 
     AWECATTSManager *mgr = [AWECATTSManager shared];
-    mgr.voiceType = voice[@"voiceType"];
-    mgr.voiceName = voice[@"name"];
+    if (self.fishMode) {
+        mgr.fishVoiceType = voice[@"voiceType"];
+        mgr.fishVoiceName = voice[@"name"];
+    } else {
+        mgr.voiceType = voice[@"voiceType"];
+        mgr.voiceName = voice[@"name"];
+    }
     [mgr saveConfig];
 
     if (self.onVoiceSelected) {
@@ -273,10 +353,12 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     if (indexPath.section == AWECAVoiceSectionCustom) {
         NSDictionary *voice = self.filteredCustom[indexPath.row];
         NSString *name = voice[@"name"];
+        NSString *vid = voice[@"voiceType"];
         UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
             title:@"删除" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
             [self.customVoices removeObjectAtIndex:indexPath.row];
             [self saveCustomVoices];
+            if (self.fishMode) [[AWECATTSManager shared] deleteFishAvatarForVoiceID:vid];
             [self filterVoices];
             [tableView performBatchUpdates:^{
                 [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
@@ -333,6 +415,26 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         return;
     }
 
+    if (self.fishMode) {
+        NSString *origType = mgr.fishVoiceType;
+        NSString *origName = mgr.fishVoiceName;
+        mgr.fishVoiceType = type;
+        BOOL origEngine = mgr.fishEngine;
+        mgr.fishEngine = YES;
+        [AWECAUtils showToast:@"正在试听..."];
+        [mgr synthesizeFishText:@"你好，这是语音试听" previewOnly:YES completion:^(BOOL success, NSString *audioPath, NSString *error) {
+            mgr.fishVoiceType = origType;
+            mgr.fishVoiceName = origName;
+            mgr.fishEngine = origEngine;
+            if (success && audioPath) {
+                [mgr playAudioAtPath:audioPath];
+            } else {
+                [AWECAUtils showToast:error ?: @"试听失败"];
+            }
+        }];
+        return;
+    }
+
     NSString *origType = mgr.voiceType;
     NSString *origName = mgr.voiceName;
 
@@ -348,6 +450,77 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         } else {
             [AWECAUtils showToast:error ?: @"试听失败"];
         }
+    }];
+}
+
+#pragma mark - 头像自定义（长按音色 → 相册选图）
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (!self.fishMode) return;
+    if (![cell.gestureRecognizers count]) {
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_longPressCell:)];
+        [cell addGestureRecognizer:lp];
+    }
+}
+
+- (void)aweca_longPressCell:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    UITableViewCell *cell = (UITableViewCell *)gr.view;
+    NSIndexPath *ip = [self.tableView indexPathForCell:cell];
+    if (!ip || ip.section != 0) return;
+    NSDictionary *voice = [self listForSection:0][ip.row];
+    NSString *vid = voice[@"voiceType"];
+    if (!vid.length) return;
+
+    BOOL hasImg = [[AWECATTSManager shared] fishAvatarForVoiceID:vid] != nil;
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:voice[@"name"]
+        message:@"自定义头像图片" preferredStyle:UIAlertControllerStyleActionSheet];
+    [ac addAction:[UIAlertAction actionWithTitle:@"从相册选择" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        self.pendingAvatarVoiceID = vid;
+        [self aweca_presentPhotoPicker];
+    }]];
+    if (hasImg) {
+        [ac addAction:[UIAlertAction actionWithTitle:@"删除图片（恢复默认头像）" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            [[AWECATTSManager shared] deleteFishAvatarForVoiceID:vid];
+            [self.tableView reloadData];
+            [AWECAUtils showToast:@"已删除头像图片"];
+        }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    if (ac.popoverPresentationController) {
+        ac.popoverPresentationController.sourceView = cell;
+        ac.popoverPresentationController.sourceRect = cell.bounds;
+    }
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)aweca_presentPhotoPicker {
+    PHPickerConfiguration *cfg = [[PHPickerConfiguration alloc] init];
+    cfg.filter = [PHPickerFilter imagesFilter];
+    cfg.selectionLimit = 1;
+    PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:cfg];
+    picker.delegate = self;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    NSString *vid = self.pendingAvatarVoiceID;
+    self.pendingAvatarVoiceID = nil;
+    if (!vid.length || results.count == 0) return;
+    NSItemProvider *provider = results.firstObject.itemProvider;
+    if (![provider canLoadObjectOfClass:[UIImage class]]) return;
+    __weak typeof(self) weakSelf = self;
+    [provider loadObjectOfClass:[UIImage class] completionHandler:^(__kindof id<NSItemProviderReading> obj, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![obj isKindOfClass:[UIImage class]]) {
+                [AWECAUtils showToast:@"读取图片失败"];
+                return;
+            }
+            BOOL ok = [[AWECATTSManager shared] saveFishAvatarImage:(UIImage *)obj forVoiceID:vid];
+            [AWECAUtils showToast:ok ? @"头像已更新" : @"头像保存失败"];
+            [weakSelf.tableView reloadData];
+        });
     }];
 }
 

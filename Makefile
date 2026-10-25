@@ -22,7 +22,7 @@ AWECommentAudioTweak_FILES = Tweak/Tweak.x \
 
 AWECommentAudioTweak_CFLAGS = -fobjc-arc
 AWECommentAudioTweak_LDFLAGS = -Xlinker -not_for_dyld_shared_cache
-AWECommentAudioTweak_FRAMEWORKS = UIKit Foundation AVFoundation CoreAudio CoreMedia UniformTypeIdentifiers SafariServices
+AWECommentAudioTweak_FRAMEWORKS = UIKit Foundation AVFoundation CoreAudio CoreMedia UniformTypeIdentifiers SafariServices PhotosUI
 AWECommentAudioTweak_LIBRARIES = objc
 
 include $(THEOS_MAKE_PATH)/library.mk

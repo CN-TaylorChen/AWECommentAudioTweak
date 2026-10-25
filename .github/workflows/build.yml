@@ -23,8 +23,12 @@ jobs:
           THEOS: ${{ github.workspace }}/theos
         run: make
 
+      - name: Resolve artifact name (声临-v<版本>)
+        id: art
+        run: echo "name=Shenglin-v$(grep '^Version:' control | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
       - name: Upload dylib artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AWECommentAudioTweak.dylib
+          name: ${{ steps.art.outputs.name }}
           path: AWECommentAudioTweak.dylib
