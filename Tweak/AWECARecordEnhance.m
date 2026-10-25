@@ -48,6 +48,7 @@ static NSString *AWECAASRCodeHint(NSString *code) {
 
 @interface AWECARecordEnhance ()
 @property (nonatomic, assign) BOOL armed;
+@property (nonatomic, assign) BOOL privateArmed;   // 私聊录音进行中标记（与评论区 armed 相互独立）
 @property (nonatomic, assign) BOOL busy;
 @property (nonatomic, copy) NSString *inFlightPath;
 @property (nonatomic, copy) NSString *inFlightStamp;    // 流水线启动时目标文件的指纹，防止覆盖已被改动的文件
@@ -71,19 +72,33 @@ static NSString *AWECAASRCodeHint(NSString *code) {
         inst = [[AWECARecordEnhance alloc] init];
         inst.waiters = [NSMutableArray array];
         inst->_enhanceEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:kAWECAEnhanceEnabled];
+        // 私聊开关默认跟随评论区（未设置过时取评论区值）
+        if ([[NSUserDefaults standardUserDefaults] objectForKey:kAWECAPrivateEnhanceEnabled] == nil) {
+            inst->_privateEnhanceEnabled = inst->_enhanceEnabled;
+        } else {
+            inst->_privateEnhanceEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:kAWECAPrivateEnhanceEnabled];
+        }
     });
     return inst;
 }
 
 + (BOOL)shouldShowStatusDot {
     AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
-    return [AWECAAudioReplacer shared].enabled || enhance.enhanceEnabled;
+    return [AWECAAudioReplacer shared].enabled || enhance.enhanceEnabled || enhance.privateEnhanceEnabled;
 }
 
 - (void)setEnhanceEnabled:(BOOL)enhanceEnabled {
     if (_enhanceEnabled == enhanceEnabled) return;
     _enhanceEnabled = enhanceEnabled;
     [[NSUserDefaults standardUserDefaults] setBool:enhanceEnabled forKey:kAWECAEnhanceEnabled];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [AWECARecordEnhance refreshStatusDots];
+}
+
+- (void)setPrivateEnhanceEnabled:(BOOL)privateEnhanceEnabled {
+    if (_privateEnhanceEnabled == privateEnhanceEnabled) return;
+    _privateEnhanceEnabled = privateEnhanceEnabled;
+    [[NSUserDefaults standardUserDefaults] setBool:privateEnhanceEnabled forKey:kAWECAPrivateEnhanceEnabled];
     [[NSUserDefaults standardUserDefaults] synchronize];
     [AWECARecordEnhance refreshStatusDots];
 }
@@ -120,6 +135,16 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     [self invalidatePipeline:@"已取消，保留原声"];
 }
 
+// 私聊场景：armed 独立于评论区，取消作废逻辑完全复用（评论区与私聊 UI 互斥，同一时刻只会有一个在录音）
+- (void)markPrivateTakeStarted {
+    self.privateArmed = YES;
+}
+
+- (void)markPrivateTakeCancelled {
+    self.privateArmed = NO;
+    [self invalidatePipeline:@"已取消，保留原声"];
+}
+
 // 作废当前流水线：epoch++ 使所有迟到回调被防护挡下（不 install、不写缓存、不假 toast）
 - (void)invalidatePipeline:(NSString *)message {
     if (!self.busy) return;
@@ -149,6 +174,10 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 
 - (BOOL)shouldRunForCommentRecording {
     return self.enhanceEnabled && self.armed && [self hasVolcanoCredentials];
+}
+
+- (BOOL)shouldRunForPrivateRecording {
+    return self.privateEnhanceEnabled && self.privateArmed && [self hasVolcanoCredentials];
 }
 
 - (BOOL)shouldSkipStickyReplaceForPath:(NSString *)path {
