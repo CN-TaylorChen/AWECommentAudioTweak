@@ -6,9 +6,9 @@ TARGET := iphone:clang:latest:15.0
 
 include $(THEOS)/makefiles/common.mk
 
-LIBRARY_NAME = AWECommentAudioTweak
+LIBRARY_NAME = Shenglin
 
-AWECommentAudioTweak_FILES = Tweak/Tweak.x \
+Shenglin_FILES = Tweak/Tweak.x \
 	Tweak/AWECADownloadManager.m \
 	Tweak/AWECAAudioReplacer.m \
 	Tweak/AWECAAudioPickerController.m \
@@ -20,10 +20,10 @@ AWECommentAudioTweak_FILES = Tweak/Tweak.x \
 	Tweak/AWECARecordEnhance.m \
 	Tweak/AWECATOSUploader.m
 
-AWECommentAudioTweak_CFLAGS = -fobjc-arc
-AWECommentAudioTweak_LDFLAGS = -Xlinker -not_for_dyld_shared_cache
-AWECommentAudioTweak_FRAMEWORKS = UIKit Foundation AVFoundation CoreAudio CoreMedia UniformTypeIdentifiers SafariServices PhotosUI
-AWECommentAudioTweak_LIBRARIES = objc
+Shenglin_CFLAGS = -fobjc-arc
+Shenglin_LDFLAGS = -Xlinker -not_for_dyld_shared_cache
+Shenglin_FRAMEWORKS = UIKit Foundation AVFoundation CoreAudio CoreMedia UniformTypeIdentifiers SafariServices PhotosUI
+Shenglin_LIBRARIES = objc
 
 include $(THEOS_MAKE_PATH)/library.mk
 

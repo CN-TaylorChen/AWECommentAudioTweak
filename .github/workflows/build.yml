@@ -1,4 +1,4 @@
-name: Build AWECommentAudioTweak
+name: Build Shenglin
 
 on:
   push:
@@ -31,4 +31,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.art.outputs.name }}
-          path: AWECommentAudioTweak.dylib
+          path: Shenglin.dylib
