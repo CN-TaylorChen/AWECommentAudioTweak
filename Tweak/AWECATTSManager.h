@@ -32,7 +32,7 @@
 #define kAWECFishEmotionNotes @"AWECFishEmotionNotes" // 情绪标签的中文备注（与 All 平行数组，空串=无备注，仅显示用）
 
 #define AWECAProductName   @"声临"
-#define AWECAVersion       @"1.4.6"
+#define AWECAVersion       @"1.4.7"
 
 @class UIImage;
 
