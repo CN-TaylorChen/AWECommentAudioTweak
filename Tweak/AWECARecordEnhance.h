@@ -47,6 +47,8 @@
 // 在发送时机同步等待流水线（私聊场景专用：发送前完成替换）
 - (void)runPrivateEnhanceAtPath:(NSString *)path
                      completion:(void(^)(BOOL ok, NSString *message))completion;
+// 该路径的流水线是否正在飞（用于发送时机判断要不要等待）
+- (BOOL)isEnhancingPath:(NSString *)path;
 - (void)resetPrivateTake;
 - (BOOL)shouldSkipStickyReplaceForPath:(NSString *)path;
 
