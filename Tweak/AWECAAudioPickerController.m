@@ -83,6 +83,7 @@ static NSString *const kVoiceAvatarB64 = @"iVBORw0KGgoAAAANSUhEUgAAAIQAAACECAYAA
 @property (nonatomic, strong) UISlider *silSlider;
 @property (nonatomic, strong) UITextField *toneField;
 @property (nonatomic, strong) UISwitch *enhanceSwitch;
+@property (nonatomic, strong) UISwitch *privateEnhanceSwitch;
 @property (nonatomic, strong) NSArray<UIButton *> *dialectBtns;
 @property (nonatomic, strong) UILabel *localTitle;
 @property (nonatomic, strong) UILabel *localSub;
@@ -492,6 +493,40 @@ static UIColor *AWECAOnPrimary(void) {
         [enRow.trailingAnchor constraintEqualToAnchor:en.trailingAnchor constant:-16],
     ]];
     [col addArrangedSubview:en];
+
+    // 私聊（IM）录音转音色开关：与评论区相互独立
+    UIView *pen = [self aweca_card];
+    UIStackView *penRow = [[UIStackView alloc] init];
+    penRow.axis = UILayoutConstraintAxisVertical;
+    penRow.spacing = 4;
+    penRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [pen addSubview:penRow];
+    UIView *pswRow = [[UIView alloc] init];
+    pswRow.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *penLab = [self aweca_label:@"私聊录音转音色" size:15 color:[UIColor labelColor]];
+    UISwitch *psw = [[UISwitch alloc] init];
+    psw.translatesAutoresizingMaskIntoConstraints = NO;
+    [psw addTarget:self action:@selector(aweca_privateEnhanceSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+    self.privateEnhanceSwitch = psw;
+    [pswRow addSubview:penLab];
+    [pswRow addSubview:psw];
+    [NSLayoutConstraint activateConstraints:@[
+        [pswRow.heightAnchor constraintEqualToConstant:48],
+        [penLab.leadingAnchor constraintEqualToAnchor:pswRow.leadingAnchor],
+        [penLab.centerYAnchor constraintEqualToAnchor:pswRow.centerYAnchor],
+        [psw.trailingAnchor constraintEqualToAnchor:pswRow.trailingAnchor],
+        [psw.centerYAnchor constraintEqualToAnchor:pswRow.centerYAnchor],
+    ]];
+    UILabel *phint = [self aweca_label:@"私聊语音条发送前自动替换为所选音色" size:12 color:[UIColor tertiaryLabelColor]];
+    [penRow addArrangedSubview:pswRow];
+    [penRow addArrangedSubview:phint];
+    [NSLayoutConstraint activateConstraints:@[
+        [penRow.topAnchor constraintEqualToAnchor:pen.topAnchor constant:4],
+        [penRow.bottomAnchor constraintEqualToAnchor:pen.bottomAnchor constant:-12],
+        [penRow.leadingAnchor constraintEqualToAnchor:pen.leadingAnchor constant:16],
+        [penRow.trailingAnchor constraintEqualToAnchor:pen.trailingAnchor constant:-16],
+    ]];
+    [col addArrangedSubview:pen];
 
     UIButton *cta = [UIButton buttonWithType:UIButtonTypeSystem];
     [cta setTitle:@"输入文字合成" forState:UIControlStateNormal];
@@ -907,6 +942,7 @@ static UIColor *AWECAOnPrimary(void) {
     self.silVal.text = [NSString stringWithFormat:@"%.0f ms", (float)mgr.silenceDurationMs];
     self.toneField.text = mgr.contextText ?: @"";
     self.enhanceSwitch.on = [AWECARecordEnhance shared].enhanceEnabled;
+    self.privateEnhanceSwitch.on = [AWECARecordEnhance shared].privateEnhanceEnabled;
     [self aweca_paintDialect];
 
     AWECAAudioReplacer *rep = [AWECAAudioReplacer shared];
@@ -991,6 +1027,10 @@ static UIColor *AWECAOnPrimary(void) {
 
 - (void)aweca_enhanceSwitchChanged:(UISwitch *)sw {
     [AWECARecordEnhance shared].enhanceEnabled = sw.on;
+}
+
+- (void)aweca_privateEnhanceSwitchChanged:(UISwitch *)sw {
+    [AWECARecordEnhance shared].privateEnhanceEnabled = sw.on;
 }
 
 - (void)aweca_clearReplace {
