@@ -49,6 +49,7 @@ static NSString *AWECAASRCodeHint(NSString *code) {
 @interface AWECARecordEnhance ()
 @property (nonatomic, assign) BOOL armed;
 @property (nonatomic, assign) BOOL privateArmed;   // 私聊录音进行中标记（与评论区 armed 相互独立）
+@property (nonatomic, assign, readwrite) BOOL privateAborted; // 私聊本次录音已取消：在飞流水线结束后不得补发消息
 @property (nonatomic, assign) BOOL busy;
 @property (nonatomic, copy) NSString *inFlightPath;
 @property (nonatomic, copy) NSString *inFlightStamp;    // 流水线启动时目标文件的指纹，防止覆盖已被改动的文件
@@ -140,11 +141,15 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     self.privateArmed = YES;
     self.privateRecordPath = nil;
     self.privateSkipOnce = NO;
+    self.privateAborted = NO;
 }
 
 - (void)markPrivateTakeCancelled {
     self.privateArmed = NO;
     self.privateRecordPath = nil;
+    // 先置取消标记再作废流水线：作废会同步 flush waiter（gate 回调），回调里凭此标记拒绝补发消息，
+    // 避免「取消过程中同步发消息」把抖音录音 UI 状态弄乱（表现为必须重进会话才能再录音）
+    self.privateAborted = YES;
     [self invalidatePipeline:@"已取消，保留原声"];
 }
 
@@ -201,6 +206,7 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 - (void)resetPrivateTake {
     self.privateArmed = NO;
     self.privateRecordPath = nil;
+    self.privateSkipOnce = NO; // 防御性：任何收尾都不得让 skip 卡在 YES（否则下一条消息被误放行为原声）
 }
 
 - (BOOL)shouldSkipStickyReplaceForPath:(NSString *)path {
@@ -256,7 +262,13 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
         void (^cb)(BOOL, NSString *) = entry[@"block"];
         NSString *wPath = entry[@"path"];
         BOOL match = (path.length > 0 && [wPath isEqualToString:path]);
-        cb(match ? ok : NO, match ? msg : @"与上一个任务冲突，请重试");
+        // 逐个异常隔离：单个 waiter 回调抛异常（如回调里消息发到已析构对象）绝不能向上冒泡——
+        // 否则会打断调用方（取消钩子里 %orig 还没执行，抖音原生录音状态就卡死）
+        @try {
+            cb(match ? ok : NO, match ? msg : @"与上一个任务冲突，请重试");
+        } @catch (NSException *e) {
+            NSLog(@"AWECA-IM: waiter exception swallowed: %@", e);
+        }
     }
 }
 

@@ -24,6 +24,9 @@
 @property (nonatomic, copy) NSString *privateRecordPath;
 // 流水线已处理完，下一次发送回调直接放行（避免递归拦截）
 @property (nonatomic, assign) BOOL privateSkipOnce;
+// 本次私聊录音已被用户取消：在飞的流水线结束后绝不能再补发消息
+// （否则取消过程中会同步发消息，弄乱抖音录音 UI，导致必须重进会话才能再录音）
+@property (nonatomic, assign, readonly) BOOL privateAborted;
 // 最近一次「取消录制」的时间戳（NSDate reference 时间；0 = 从未取消或已开新录音）。
 // 钩子用它识别「取消后紧跟的 DidFinishRecording 残留」——抖音取消时也会以 success:YES 回调。
 // 这是状态标记而非时间窗口：取消后持续有效，直到下一次 markCommentTakeStarted 清零。

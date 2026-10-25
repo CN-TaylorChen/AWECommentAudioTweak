@@ -20,7 +20,7 @@
 #define kAWECATTSVolcanoVoiceName @"AWECATTSVolcanoVoiceName"
 
 #define AWECAProductName   @"声临"
-#define AWECAVersion       @"1.4.2"
+#define AWECAVersion       @"1.4.3"
 
 @interface AWECATTSManager : NSObject <AVAudioPlayerDelegate>
 
