@@ -805,7 +805,6 @@ static UIColor *AWECAOnPrimary(void) {
         [b setTitle:tag forState:UIControlStateNormal];
         b.titleLabel.font = [UIFont systemFontOfSize:12];
         b.layer.cornerRadius = 13;
-        b.contentEdgeInsets = UIEdgeInsetsMake(4, 10, 4, 10);
         [b sizeToFit];
         CGSize fits = [b.titleLabel.text sizeWithAttributes:@{NSFontAttributeName: b.titleLabel.font}];
         CGFloat w = fits.width + 22, h = 26;
@@ -825,7 +824,6 @@ static UIColor *AWECAOnPrimary(void) {
     add.layer.cornerRadius = 13;
     add.layer.borderWidth = 1;
     add.layer.borderColor = [UIColor tertiaryLabelColor].CGColor;
-    add.contentEdgeInsets = UIEdgeInsetsMake(4, 10, 4, 10);
     [add setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
     CGSize fs = [add.titleLabel.text sizeWithAttributes:@{NSFontAttributeName: add.titleLabel.font}];
     CGFloat aw = fs.width + 22;
