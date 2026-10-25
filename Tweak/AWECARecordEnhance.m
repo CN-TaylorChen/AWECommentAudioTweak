@@ -193,6 +193,11 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     [self waitForEnhancedPath:path completion:completion];
 }
 
+- (BOOL)isEnhancingPath:(NSString *)path {
+    if (!self.busy || !path.length) return NO;
+    return [self.inFlightPath isEqualToString:path];
+}
+
 - (void)resetPrivateTake {
     self.privateArmed = NO;
     self.privateRecordPath = nil;
