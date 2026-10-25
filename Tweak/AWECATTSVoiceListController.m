@@ -40,6 +40,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    if (self.emotionMode) { [self aweca_setupEmotionMode]; return; }
     [self buildVoiceData];
     [self loadCustomVoices];
     [self loadRecommended];
@@ -82,6 +83,102 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.navigationController setNavigationBarHidden:NO animated:animated];
+}
+
+#pragma mark - 情绪标签管理模式
+
+- (void)aweca_setupEmotionMode {
+    self.title = [NSString stringWithFormat:@"%@ · 情绪标签", AWECAProductName];
+    [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
+
+    UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(aweca_addEmotionTag)];
+    self.navigationItem.rightBarButtonItem = addBtn;
+
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
+    UILabel *hint = [[UILabel alloc] initWithFrame:footer.bounds];
+    hint.text = @"点行勾选/取消 · 左滑编辑或删除 · ＋ 新增标签";
+    hint.textAlignment = NSTextAlignmentCenter;
+    hint.font = [UIFont systemFontOfSize:11];
+    hint.textColor = [UIColor tertiaryLabelColor];
+    [footer addSubview:hint];
+    self.tableView.tableFooterView = footer;
+    self.tableView.tableHeaderView = nil;   // 不需要搜索栏
+}
+
+// 依据当前模型给裸标签加括号：s1 用圆括号，s2 系用方括号；已带括号则原样返回
++ (NSString *)aweca_wrapEmotionTag:(NSString *)raw {
+    NSString *t = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!t.length) return t;
+    if (([t hasPrefix:@"["] && [t hasSuffix:@"]"]) || ([t hasPrefix:@"("] && [t hasSuffix:@")"])) return t;
+    NSString *model = [AWECATTSManager shared].fishModel ?: @"";
+    return [model isEqualToString:@"s1"] ? [NSString stringWithFormat:@"(%@)", t]
+                                         : [NSString stringWithFormat:@"[%@]", t];
+}
+
++ (NSString *)aweca_stripEmotionTag:(NSString *)tag {
+    NSString *t = [tag stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (([t hasPrefix:@"["] && [t hasSuffix:@"]"]) || ([t hasPrefix:@"("] && [t hasSuffix:@")"])) {
+        t = [t substringWithRange:NSMakeRange(1, t.length - 2)];
+    }
+    return t;
+}
+
+- (void)aweca_addEmotionTag {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"添加情绪标签"
+        message:[NSString stringWithFormat:@"如 chuckle、whisper（当前模型 %@ 将自动加 %@）",
+                 mgr.fishModel ?: @"s2.1-pro-free",
+                 [mgr.fishModel isEqualToString:@"s1"] ? @"圆括号" : @"方括号"]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"标签内容（可不带括号）";
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *tag = [self.class aweca_wrapEmotionTag:alert.textFields[0].text ?: @""];
+        if (!tag.length) { [AWECAUtils showToast:@"标签不能为空"]; return; }
+        NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
+        if ([all containsObject:tag]) { [AWECAUtils showToast:@"该标签已存在"]; return; }
+        [all addObject:tag];
+        mgr.fishEmotionAll = all;
+        [mgr saveConfig];
+        [self.tableView reloadData];
+        if (self.onEmotionsChanged) self.onEmotionsChanged();
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)aweca_editEmotionTagAtIndex:(NSInteger)idx {
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    if (idx < 0 || idx >= (NSInteger)mgr.fishEmotionAll.count) return;
+    NSString *old = mgr.fishEmotionAll[idx];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"编辑情绪标签"
+        message:old preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [self.class aweca_stripEmotionTag:old];
+        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *tag = [self.class aweca_wrapEmotionTag:alert.textFields[0].text ?: @""];
+        if (!tag.length) { [AWECAUtils showToast:@"标签不能为空"]; return; }
+        NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
+        NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
+        BOOL wasSel = [sel containsObject:old];
+        if (wasSel) [sel removeObject:old];
+        all[idx] = tag;
+        if (wasSel && ![sel containsObject:tag]) [sel addObject:tag];
+        mgr.fishEmotionAll = all;
+        mgr.fishEmotionSel = sel;
+        [mgr saveConfig];
+        [self.tableView reloadData];
+        if (self.onEmotionsChanged) self.onEmotionsChanged();
+        [AWECAUtils showToast:@"已更新标签"];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 #pragma mark - 自定义音色持久化
@@ -217,14 +314,21 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    if (self.emotionMode) return 1;
     return self.fishMode ? 1 : AWECAVoiceSectionCount;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (self.emotionMode) return [AWECATTSManager shared].fishEmotionAll.count;
     return [self listForSection:section].count;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    if (self.emotionMode) {
+        AWECATTSManager *mgr = [AWECATTSManager shared];
+        return [NSString stringWithFormat:@"全部标签 (%lu) · 已选 %lu 个",
+                (unsigned long)mgr.fishEmotionAll.count, (unsigned long)mgr.fishEmotionSel.count];
+    }
     if (self.fishMode) return [NSString stringWithFormat:@"我的音色 (%lu) · 长按自定义头像", (unsigned long)self.filteredCustom.count];
     switch (section) {
         case AWECAVoiceSectionCustom: return [NSString stringWithFormat:@"我的音色 (%lu)", (unsigned long)self.filteredCustom.count];
@@ -281,11 +385,22 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryNone;
 
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+
+    if (self.emotionMode) {
+        NSString *tag = mgr.fishEmotionAll[indexPath.row];
+        cell.textLabel.text = tag;
+        cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        if ([mgr.fishEmotionSel containsObject:tag]) {
+            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+        }
+        return cell;
+    }
+
     NSDictionary *voice = [self listForSection:indexPath.section][indexPath.row];
     NSString *name = voice[@"name"];
     NSString *type = voice[@"voiceType"];
 
-    AWECATTSManager *mgr = [AWECATTSManager shared];
     NSString *cur = self.fishMode ? (mgr.fishVoiceType ?: @"") : (mgr.voiceType.length > 0 ? mgr.voiceType : @"zh_female_cancan_uranus_bigtts");
 
     if (self.fishMode) {
@@ -322,9 +437,22 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+
+    if (self.emotionMode) {
+        NSString *tag = mgr.fishEmotionAll[indexPath.row];
+        NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
+        if ([sel containsObject:tag]) [sel removeObject:tag];
+        else [sel addObject:tag];
+        mgr.fishEmotionSel = sel;
+        [mgr saveConfig];
+        [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
+        if (self.onEmotionsChanged) self.onEmotionsChanged();
+        return;
+    }
+
     NSDictionary *voice = [self listForSection:indexPath.section][indexPath.row];
 
-    AWECATTSManager *mgr = [AWECATTSManager shared];
     if (self.fishMode) {
         mgr.fishVoiceType = voice[@"voiceType"];
         mgr.fishVoiceName = voice[@"name"];
@@ -343,6 +471,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 #pragma mark - 推荐编辑
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (self.emotionMode) return YES;
     if (self.searchText.length > 0) return NO;
     return YES;
 }
@@ -350,10 +479,104 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (self.searchText.length > 0) return nil;
 
+    // 情绪标签模式：左滑编辑 / 删除
+    if (self.emotionMode) {
+        AWECATTSManager *mgr = [AWECATTSManager shared];
+        NSInteger idx = indexPath.row;
+        NSString *tag = mgr.fishEmotionAll[idx];
+        UIContextualAction *editAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+            title:@"编辑" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+            [self aweca_editEmotionTagAtIndex:idx];
+            completionHandler(NO);
+        }];
+        editAction.backgroundColor = [UIColor systemBlueColor];
+        UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+            title:@"删除" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+            NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
+            NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
+            [all removeObject:tag];
+            [sel removeObject:tag];
+            mgr.fishEmotionAll = all;
+            mgr.fishEmotionSel = sel;
+            [mgr saveConfig];
+            [tableView performBatchUpdates:^{
+                [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
+            } completion:nil];
+            if (self.onEmotionsChanged) self.onEmotionsChanged();
+            [AWECAUtils showToast:[NSString stringWithFormat:@"已删除: %@", tag]];
+            completionHandler(YES);
+        }];
+        return [UISwipeActionsConfiguration configurationWithActions:@[removeAction, editAction]];
+    }
+
     if (indexPath.section == AWECAVoiceSectionCustom) {
         NSDictionary *voice = self.filteredCustom[indexPath.row];
         NSString *name = voice[@"name"];
         NSString *vid = voice[@"voiceType"];
+        NSInteger row = indexPath.row;
+
+        UIContextualAction *editAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+            title:@"编辑" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"编辑音色"
+                message:nil preferredStyle:UIAlertControllerStyleAlert];
+            [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+                tf.text = name;
+                tf.placeholder = @"音色名称";
+            }];
+            [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+                tf.text = vid;
+                tf.placeholder = @"音色 ID";
+                tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+                tf.autocorrectionType = UITextAutocorrectionTypeNo;
+            }];
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a2) {
+                NSString *newName = alert.textFields[0].text ?: @"";
+                NSString *newVid = [alert.textFields[1].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (newVid.length == 0) { [AWECAUtils showToast:@"音色 ID 不能为空"]; return; }
+                if (newName.length == 0) newName = newVid;
+                BOOL vidChanged = ![newVid isEqualToString:vid];
+                // 音色库内 ID 查重（排除自身）
+                if (vidChanged) {
+                    for (NSUInteger i = 0; i < self.customVoices.count; i++) {
+                        if ((NSInteger)i != row && [self.customVoices[i][@"voiceType"] isEqualToString:newVid]) {
+                            [AWECAUtils showToast:@"该音色 ID 已存在"];
+                            return;
+                        }
+                    }
+                }
+                self.customVoices[row] = @{@"name": newName, @"voiceType": newVid};
+                [self saveCustomVoices];
+                // 若编辑的是当前选中音色，同步更新选中引用与头像
+                AWECATTSManager *m = [AWECATTSManager shared];
+                if (self.fishMode) {
+                    if ([m.fishVoiceType isEqualToString:vid]) {
+                        m.fishVoiceType = newVid;
+                        m.fishVoiceName = newName;
+                        [m saveConfig];
+                    }
+                    if (vidChanged) {
+                        UIImage *oldAv = [m fishAvatarForVoiceID:vid];
+                        if (oldAv) {
+                            [m saveFishAvatarImage:oldAv forVoiceID:newVid];
+                            [m deleteFishAvatarForVoiceID:vid];
+                        }
+                    }
+                } else if ([m.voiceType isEqualToString:vid]) {
+                    m.voiceType = newVid;
+                    m.voiceName = newName;
+                    [m saveConfig];
+                }
+                [self filterVoices];
+                [self.tableView reloadData];
+                if (self.onVoiceSelected) self.onVoiceSelected(newVid, newName);
+                [AWECAUtils showToast:@"已更新音色"];
+            }]];
+            [self presentViewController:alert animated:YES completion:nil];
+            completionHandler(NO);
+        }];
+        editAction.backgroundColor = [UIColor systemBlueColor];
+
         UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
             title:@"删除" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
             [self.customVoices removeObjectAtIndex:indexPath.row];
@@ -366,7 +589,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
             [AWECAUtils showToast:[NSString stringWithFormat:@"已删除: %@", name]];
             completionHandler(YES);
         }];
-        return [UISwipeActionsConfiguration configurationWithActions:@[removeAction]];
+        return [UISwipeActionsConfiguration configurationWithActions:@[removeAction, editAction]];
 
     } else if (indexPath.section == AWECAVoiceSectionRecommended) {
         UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive

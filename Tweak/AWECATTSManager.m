@@ -354,7 +354,7 @@ static int aweca_mapPitchToV3(float ratio) {
     // 情绪标签直接拼在文本前（s2.x 用 [tag]，s1 用 (tag)，由用户自行维护）
     NSString *fullText = [[self fishEmotionPrefix] stringByAppendingString:text];
     NSString *model = AWECATrim(self.fishModel);
-    if (!model.length) model = @"s2.1-pro";
+    if (!model.length) model = @"s2.1-pro-free";
 
     NSMutableDictionary *body = [@{
         @"text": fullText,
@@ -399,6 +399,11 @@ static int aweca_mapPitchToV3(float ratio) {
                 if ([m isKindOfClass:[NSString class]] && m.length) msg = m;
             }
             if (!data.length) msg = @"服务器无响应";
+            if (http.statusCode == 402) {
+                msg = @"FishAudio API 余额不足：模型选「免费版」(s2.1-pro-free) 可零费用，或到 fish.audio/app/developers 充值";
+            } else if (http.statusCode == 401) {
+                msg = @"API Key 无效或已过期，请检查";
+            }
             NSLog(@"AWECA-Fish: error %ld %@", (long)http.statusCode, msg);
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(NO, nil, [NSString stringWithFormat:@"合成错误(%ld): %@", (long)http.statusCode, msg]);
@@ -700,7 +705,7 @@ static int aweca_mapPitchToV3(float ratio) {
     if (self.lastSynthesizedPath) [d setObject:self.lastSynthesizedPath forKey:kAWECATTSLastPath];
     [d setBool:self.fishEngine forKey:kAWECATTSEngine];
     [d setObject:self.fishAPIKey ?: @"" forKey:kAWECFishAPIKey];
-    [d setObject:self.fishModel ?: @"s2.1-pro" forKey:kAWECFishModel];
+    [d setObject:self.fishModel ?: @"s2.1-pro-free" forKey:kAWECFishModel];
     [d setObject:self.fishVoiceType ?: @"" forKey:kAWECFishVoiceType];
     [d setObject:self.fishVoiceName ?: @"" forKey:kAWECFishVoiceName];
     [d setObject:self.fishEmotionSel ?: @[] forKey:kAWECFishEmotionSel];
@@ -731,7 +736,7 @@ static int aweca_mapPitchToV3(float ratio) {
 
     self.fishEngine = [d boolForKey:kAWECATTSEngine];
     self.fishAPIKey = AWECATrim([d objectForKey:kAWECFishAPIKey]);
-    self.fishModel = [d objectForKey:kAWECFishModel] ?: @"s2.1-pro";
+    self.fishModel = [d objectForKey:kAWECFishModel] ?: @"s2.1-pro-free";
     self.fishVoiceType = [d objectForKey:kAWECFishVoiceType];
     self.fishVoiceName = [d objectForKey:kAWECFishVoiceName];
     id selEmo = [d objectForKey:kAWECFishEmotionSel];

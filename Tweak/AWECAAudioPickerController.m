@@ -77,7 +77,7 @@ static NSString *const kVoiceAvatarB64 = @"iVBORw0KGgoAAAANSUhEUgAAAIQAAACECAYAA
 @property (nonatomic, strong) UILabel *fishNameLabel;
 @property (nonatomic, strong) UILabel *fishSubLabel;
 @property (nonatomic, strong) UISegmentedControl *modelSeg;
-@property (nonatomic, strong) UIScrollView *emotionScroll;
+@property (nonatomic, strong) UILabel *emotionValueLabel;
 @property (nonatomic, copy) NSString *pendingAvatarVoiceID;
 @property (nonatomic, strong) UILabel *voiceNameLabel;
 @property (nonatomic, strong) UIImageView *avatarView;
@@ -342,7 +342,7 @@ static UIColor *AWECAOnPrimary(void) {
         bar.tintColor = label;
     }
     [self aweca_paintDialect];
-    [self aweca_paintEmotionChips];
+    [self aweca_refreshEmotionRow];
     [self.favTable reloadData];
 }
 
@@ -664,10 +664,12 @@ static UIColor *AWECAOnPrimary(void) {
     ]];
     [inner addArrangedSubview:row];
 
-    // 模型选择：s2.1-pro / s2-pro / s1
-    UISegmentedControl *mseg = [[UISegmentedControl alloc] initWithItems:@[@"s2.1-pro", @"s2-pro", @"s1"]];
-    NSString *curModel = [AWECATTSManager shared].fishModel ?: @"s2.1-pro";
-    mseg.selectedSegmentIndex = [curModel isEqualToString:@"s1"] ? 2 : ([curModel isEqualToString:@"s2-pro"] ? 1 : 0);
+    // 模型选择：免费版（s2.1-pro-free，同质量 $0）/ s2.1-pro / s2-pro / s1
+    UISegmentedControl *mseg = [[UISegmentedControl alloc] initWithItems:@[@"免费版", @"s2.1-pro", @"s2-pro", @"s1"]];
+    NSString *curModel = [AWECATTSManager shared].fishModel ?: @"s2.1-pro-free";
+    mseg.selectedSegmentIndex = [curModel isEqualToString:@"s2.1-pro"] ? 1
+                              : ([curModel isEqualToString:@"s2-pro"] ? 2
+                              : ([curModel isEqualToString:@"s1"] ? 3 : 0));
     mseg.translatesAutoresizingMaskIntoConstraints = NO;
     [mseg addTarget:self action:@selector(aweca_modelChanged:) forControlEvents:UIControlEventValueChanged];
     self.modelSeg = mseg;
@@ -683,28 +685,33 @@ static UIColor *AWECAOnPrimary(void) {
     ]];
     [inner addArrangedSubview:modelWrap];
 
-    // 情绪标签（多选，横向滚动）
-    UIView *emoBox = [[UIView alloc] init];
-    emoBox.translatesAutoresizingMaskIntoConstraints = NO;
-    UILabel *emoLab = [self aweca_label:@"情绪标签（可多选，拼在识别文字前）" size:13 color:[UIColor tertiaryLabelColor]];
-    UIScrollView *escroll = [[UIScrollView alloc] init];
-    escroll.showsHorizontalScrollIndicator = NO;
-    escroll.translatesAutoresizingMaskIntoConstraints = NO;
-    self.emotionScroll = escroll;
-    [emoBox addSubview:emoLab];
-    [emoBox addSubview:escroll];
+    // 情绪标签（点行进管理页：点行勾选/取消，左滑编辑/删除，＋新增）
+    UIView *emoRow = [[UIView alloc] init];
+    emoRow.translatesAutoresizingMaskIntoConstraints = NO;
+    emoRow.backgroundColor = AWECASoftFill();
+    emoRow.layer.cornerRadius = 10;
+    UILabel *emoTitle = [self aweca_label:@"情绪标签" size:14 color:AWECALabel()];
+    UILabel *emoValue = [self aweca_label:@"" size:12 color:[UIColor secondaryLabelColor]];
+    self.emotionValueLabel = emoValue;
+    UILabel *emoChevron = [self aweca_label:@"›" size:18 color:[UIColor tertiaryLabelColor]];
+    [emoRow addSubview:emoTitle];
+    [emoRow addSubview:emoValue];
+    [emoRow addSubview:emoChevron];
+    UITapGestureRecognizer *emoTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_pushEmotionTags)];
+    [emoRow addGestureRecognizer:emoTap];
     [NSLayoutConstraint activateConstraints:@[
-        [emoBox.heightAnchor constraintEqualToConstant:56],
-        [emoLab.leadingAnchor constraintEqualToAnchor:emoBox.leadingAnchor constant:16],
-        [emoLab.topAnchor constraintEqualToAnchor:emoBox.topAnchor constant:6],
-        [escroll.leadingAnchor constraintEqualToAnchor:emoBox.leadingAnchor constant:12],
-        [escroll.trailingAnchor constraintEqualToAnchor:emoBox.trailingAnchor constant:-12],
-        [escroll.topAnchor constraintEqualToAnchor:emoLab.bottomAnchor constant:4],
-        [escroll.bottomAnchor constraintEqualToAnchor:emoBox.bottomAnchor constant:-6],
+        [emoRow.heightAnchor constraintEqualToConstant:48],
+        [emoTitle.leadingAnchor constraintEqualToAnchor:emoRow.leadingAnchor constant:12],
+        [emoTitle.centerYAnchor constraintEqualToAnchor:emoRow.centerYAnchor],
+        [emoChevron.trailingAnchor constraintEqualToAnchor:emoRow.trailingAnchor constant:-12],
+        [emoChevron.centerYAnchor constraintEqualToAnchor:emoRow.centerYAnchor],
+        [emoValue.leadingAnchor constraintEqualToAnchor:emoTitle.trailingAnchor constant:10],
+        [emoValue.centerYAnchor constraintEqualToAnchor:emoRow.centerYAnchor],
+        [emoValue.trailingAnchor constraintLessThanOrEqualToAnchor:emoChevron.leadingAnchor constant:-6],
     ]];
-    [inner addArrangedSubview:emoBox];
+    [inner addArrangedSubview:emoRow];
 
-    UILabel *hint = [self aweca_label:@"s2.x 情绪用方括号如 [chuckle]；s1 用圆括号如 (angry)" size:11 color:[UIColor tertiaryLabelColor]];
+    UILabel *hint = [self aweca_label:@"标签拼在识别文字前；s2 系自动加 []、s1 加 ()" size:11 color:[UIColor tertiaryLabelColor]];
     hint.numberOfLines = 0;
     UIView *hintWrap = [[UIView alloc] init];
     hintWrap.translatesAutoresizingMaskIntoConstraints = NO;
@@ -736,7 +743,7 @@ static UIColor *AWECAOnPrimary(void) {
 
 - (void)aweca_modelChanged:(UISegmentedControl *)seg {
     AWECATTSManager *mgr = [AWECATTSManager shared];
-    mgr.fishModel = @[ @"s2.1-pro", @"s2-pro", @"s1" ][seg.selectedSegmentIndex];
+    mgr.fishModel = @[ @"s2.1-pro-free", @"s2.1-pro", @"s2-pro", @"s1" ][seg.selectedSegmentIndex];
     [mgr saveConfig];
 }
 
@@ -764,7 +771,7 @@ static UIColor *AWECAOnPrimary(void) {
         self.fishAvatarView.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1];
         self.fishAvatarView.layer.cornerRadius = 22;
     }
-    [self aweca_paintEmotionChips];
+    [self aweca_refreshEmotionRow];
 }
 
 - (void)aweca_fishPreview {
@@ -787,137 +794,34 @@ static UIColor *AWECAOnPrimary(void) {
     [self aweca_presentPhotoPicker];
 }
 
-#pragma mark - 情绪标签
+#pragma mark - 情绪标签（方案 B：摘要行 + 独立管理页）
 
-- (void)aweca_paintEmotionChips {
+- (void)aweca_refreshEmotionRow {
     AWECATTSManager *mgr = [AWECATTSManager shared];
-    NSArray *all = mgr.fishEmotionAll;
-    UIView *content = self.emotionScroll.subviews.firstObject;
-    for (UIView *v in content.subviews) [v removeFromSuperview];
-    BOOL dark = !AWECADouyinIsLight();
-
-    CGFloat x = 4, y = 2;
-    CGFloat maxW = CGRectGetWidth(self.emotionScroll.bounds);
-    if (maxW <= 1) maxW = 300;
-    for (NSInteger i = 0; i < (NSInteger)all.count; i++) {
-        NSString *tag = all[i];
-        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-        [b setTitle:tag forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont systemFontOfSize:12];
-        b.layer.cornerRadius = 13;
-        [b sizeToFit];
-        CGSize fits = [b.titleLabel.text sizeWithAttributes:@{NSFontAttributeName: b.titleLabel.font}];
-        CGFloat w = fits.width + 22, h = 26;
-        if (x + w > maxW - 8 && x > 4) { x = 4; y += h + 6; }
-        b.frame = CGRectMake(x, y, w, h);
-        b.tag = 9500 + i;
-        [b addTarget:self action:@selector(aweca_emotionTapped:) forControlEvents:UIControlEventTouchUpInside];
-        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_emotionLongPress:)];
-        [b addGestureRecognizer:lp];
-        [content addSubview:b];
-        x += w + 6;
-    }
-    // ＋ 添加标签
-    UIButton *add = [UIButton buttonWithType:UIButtonTypeSystem];
-    [add setTitle:@"＋ 添加" forState:UIControlStateNormal];
-    add.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    add.layer.cornerRadius = 13;
-    add.layer.borderWidth = 1;
-    add.layer.borderColor = [UIColor tertiaryLabelColor].CGColor;
-    [add setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
-    CGSize fs = [add.titleLabel.text sizeWithAttributes:@{NSFontAttributeName: add.titleLabel.font}];
-    CGFloat aw = fs.width + 22;
-    if (x + aw > maxW - 8 && x > 4) { x = 4; y += 32; }
-    add.frame = CGRectMake(x, y, aw, 26);
-    [add addTarget:self action:@selector(aweca_addEmotion) forControlEvents:UIControlEventTouchUpInside];
-    [content addSubview:add];
-    y += 32;
-
-    content.frame = CGRectMake(0, 0, maxW, y);
-    self.emotionScroll.contentSize = CGSizeMake(maxW, y);
-    self.emotionScroll.scrollEnabled = (y > CGRectGetHeight(self.emotionScroll.bounds));
-
-    // 选中态上色
-    for (UIView *v in content.subviews) {
-        if (![v isKindOfClass:[UIButton class]] || v.tag < 9500) continue;
-        UIButton *b = (UIButton *)v;
-        NSString *tag = all[v.tag - 9500];
-        BOOL sel = [mgr.fishEmotionSel containsObject:tag];
-        if (sel) {
-            b.backgroundColor = AWECALabel();
-            [b setTitleColor:AWECAOnPrimary() forState:UIControlStateNormal];
-            b.layer.borderWidth = 0;
-        } else {
-            b.backgroundColor = AWECASoftFill();
-            [b setTitleColor:dark ? [UIColor colorWithWhite:0.73 alpha:1] : [UIColor colorWithWhite:0.27 alpha:1] forState:UIControlStateNormal];
-            b.layer.borderWidth = 0;
+    if (!self.emotionValueLabel) return;
+    if (mgr.fishEmotionSel.count == 0) {
+        self.emotionValueLabel.text = @"未选择";
+    } else {
+        NSMutableArray *parts = [NSMutableArray array];
+        for (NSString *tag in mgr.fishEmotionSel) {
+            NSString *t = tag;
+            if (([t hasPrefix:@"["] && [t hasSuffix:@"]"]) || ([t hasPrefix:@"("] && [t hasSuffix:@")"]))
+                t = [t substringWithRange:NSMakeRange(1, t.length - 2)];
+            [parts addObject:t];
         }
+        self.emotionValueLabel.text = [parts componentsJoinedByString:@" · "];
     }
 }
 
-- (void)aweca_emotionTapped:(UIButton *)btn {
-    AWECATTSManager *mgr = [AWECATTSManager shared];
-    NSInteger i = btn.tag - 9500;
-    if (i < 0 || i >= (NSInteger)mgr.fishEmotionAll.count) return;
-    NSString *tag = mgr.fishEmotionAll[i];
-    NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
-    if ([sel containsObject:tag]) [sel removeObject:tag];
-    else [sel addObject:tag];
-    mgr.fishEmotionSel = sel;
-    [mgr saveConfig];
-    [self aweca_paintEmotionChips];
-}
-
-- (void)aweca_emotionLongPress:(UILongPressGestureRecognizer *)gr {
-    if (gr.state != UIGestureRecognizerStateBegan) return;
-    UIButton *btn = (UIButton *)gr.view;
-    AWECATTSManager *mgr = [AWECATTSManager shared];
-    NSInteger i = btn.tag - 9500;
-    if (i < 0 || i >= (NSInteger)mgr.fishEmotionAll.count) return;
-    NSString *tag = mgr.fishEmotionAll[i];
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:tag message:@"删除该情绪标签？" preferredStyle:UIAlertControllerStyleActionSheet];
-    [ac addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-        NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
-        NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
-        [all removeObject:tag];
-        [sel removeObject:tag];
-        mgr.fishEmotionAll = all;
-        mgr.fishEmotionSel = sel;
-        [mgr saveConfig];
-        [self aweca_paintEmotionChips];
-    }]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    if (ac.popoverPresentationController) {
-        ac.popoverPresentationController.sourceView = btn;
-        ac.popoverPresentationController.sourceRect = btn.bounds;
-    }
-    [self presentViewController:ac animated:YES completion:nil];
-}
-
-- (void)aweca_addEmotion {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"添加情绪标签"
-        message:@"s2.x 模型用方括号如 [chuckle] [whisper]；s1 用圆括号如 (angry)。留括号由你输入，插件原样拼接。"
-        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"例如 [laugh] 或 (excited)";
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        NSString *tag = [ac.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (!tag.length) return;
-        AWECATTSManager *mgr = [AWECATTSManager shared];
-        NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
-        if (![all containsObject:tag]) [all addObject:tag];
-        mgr.fishEmotionAll = all;
-        NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
-        if (![sel containsObject:tag]) [sel addObject:tag];
-        mgr.fishEmotionSel = sel;
-        [mgr saveConfig];
-        [self aweca_paintEmotionChips];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
+- (void)aweca_pushEmotionTags {
+    [self aweca_showNavForPush];
+    AWECATTSVoiceListController *vc = [[AWECATTSVoiceListController alloc] init];
+    vc.emotionMode = YES;
+    __weak typeof(self) weakSelf = self;
+    vc.onEmotionsChanged = ^{
+        [weakSelf aweca_refreshEmotionRow];
+    };
+    [self.navigationController pushViewController:vc animated:YES];
 }
 
 #pragma mark - 头像图片选择（PHPicker）

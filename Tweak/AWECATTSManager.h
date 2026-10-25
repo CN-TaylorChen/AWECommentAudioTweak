@@ -23,7 +23,7 @@
 #define kAWECATTSEngine       @"AWECATTSEngine"
 // FishAudio（api.fish.audio）
 #define kAWECFishAPIKey       @"AWECFishAPIKey"
-#define kAWECFishModel        @"AWECFishModel"        // s2.1-pro / s2-pro / s1
+#define kAWECFishModel        @"AWECFishModel"        // s2.1-pro-free（免费档，默认）/ s2.1-pro / s2-pro / s1
 #define kAWECFishVoices       @"AWECFishVoices"       // [{name, voiceType(=reference_id), avatar(emoji 可空), color(索引 可空)}]
 #define kAWECFishVoiceType    @"AWECFishVoiceType"    // 当前选中的 reference_id
 #define kAWECFishVoiceName    @"AWECFishVoiceName"
@@ -31,7 +31,7 @@
 #define kAWECFishEmotionAll   @"AWECFishEmotionAll"   // 全部可选情绪标签
 
 #define AWECAProductName   @"声临"
-#define AWECAVersion       @"1.4.4"
+#define AWECAVersion       @"1.4.5"
 
 @class UIImage;
 
