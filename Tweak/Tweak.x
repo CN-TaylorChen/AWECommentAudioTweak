@@ -38,7 +38,6 @@ static void setupAudioInputElementHook(void);
     // 因此无论取消的完成回调迟到多久都能识别；且取消的 DidFinishRecording 必先于用户下一次录音操作，
     // 不存在"误挡正常录音"的窗口（早期用 0.5s 时间窗，主线程忙时必漏）
     BOOL cancelResidue = enhance.cancelledTake;
-
     if (success && enhance.enhanceEnabled && enhance.armed && ![enhance shouldRunForCommentRecording]) {
         [AWECAUtils showToast:@"请先填写火山 API Key"];
         %orig;
@@ -80,6 +79,70 @@ static void setupAudioInputElementHook(void);
     if ([[NSFileManager defaultManager] fileExistsAtPath:audioFilePath]) {
         [[AWECAAudioReplacer shared] replaceAudioAtPath:audioFilePath];
     }
+}
+
+%end
+
+// 私聊（IM）录音转音色
+// 链路与评论区同构（IPA 40.8.0 离线确认）：
+//   AWEIMAudioRecordController（控制器，recordFilePath 拿路径）
+//   AWEIMAudioMessageRecorder（录音器）
+//   AWEIMDNewInputViewController（输入 VC，实现 AWEIMAudioInputTouchViewDelegate 触摸事件）
+// 触摸取消参数 cancelled 由抖音直接给出，比评论区 clear 启发式更准
+
+%hook AWEIMAudioRecordController
+
+// 新版签名（带 action 参数，IPA 40.8.0 方法名池确认存在）
+- (void)audioRecorderDidFinishRecording:(id)recorder success:(BOOL)success action:(NSInteger)action error:(id)error {
+    %orig;
+    NSString *path = self.recordFilePath;
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSLog(@"AWECA-IM: DidFinish(action) success=%d path=%@ armed=%d run=%d", success, path, enhance.privateArmed, [enhance shouldRunForPrivateRecording]);
+    if (success && [enhance shouldRunForPrivateRecording] && path.length) {
+        [enhance beginIfNeededAtPath:path];
+    }
+}
+
+// 旧版签名（与评论区同款，两个变体都 hook，真机确认哪个被触发后清理）
+- (void)audioRecorderDidFinishRecording:(id)recorder success:(BOOL)success error:(id)error {
+    %orig;
+    NSString *path = self.recordFilePath;
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSLog(@"AWECA-IM: DidFinish(simple) success=%d path=%@ armed=%d run=%d", success, path, enhance.privateArmed, [enhance shouldRunForPrivateRecording]);
+    if (success && [enhance shouldRunForPrivateRecording] && path.length) {
+        [enhance beginIfNeededAtPath:path];
+    }
+}
+
+%end
+
+%hook AWEIMDNewInputViewController
+
+// 手指按下：进入录音，武装私聊场景
+- (void)audioInputTouchViewTouchDownInside:(id)view {
+    %orig;
+    [[AWECARecordEnhance shared] markPrivateTakeStarted];
+}
+
+// 抬起（含 isInTranslate 变体）：取消 或 转文字模式都撤装
+- (void)audioInputTouchViewTouchUpInside:(id)view cancelled:(BOOL)cancelled isInTranslate:(BOOL)isInTranslate {
+    %orig;
+    NSLog(@"AWECA-IM: TouchUp(full) cancelled=%d isInTranslate=%d", cancelled, isInTranslate);
+    if (cancelled || isInTranslate) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+}
+
+// 抬起（简单变体）
+- (void)audioInputTouchViewTouchUpInside:(id)view cancelled:(BOOL)cancelled {
+    %orig;
+    NSLog(@"AWECA-IM: TouchUp(simple) cancelled=%d", cancelled);
+    if (cancelled) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+}
+
+// 抬起时手指在区域外（取消）
+- (void)audioInputTouchViewTouchUpOutside:(id)view cancelled:(BOOL)cancelled {
+    %orig;
+    NSLog(@"AWECA-IM: TouchUpOutside cancelled=%d", cancelled);
+    if (cancelled) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
 }
 
 %end
