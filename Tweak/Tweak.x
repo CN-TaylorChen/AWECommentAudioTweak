@@ -84,126 +84,304 @@ static void setupAudioInputElementHook(void);
 %end
 
 // 私聊（IM）录音转音色
-// 40.8.0 实测：私聊录音 UI 走新 delegate 家族 recorderAnimationView*（AWEIMRichRecorderAnimationViewDelegate），
-// 老的 audioInputTouchView* 是另一套面板。两套都 hook，谁被调用谁生效。
-// 关键点：私信语音松手后有「发送/取消/转文字」确认面板，点发送才真正发消息，
-// 这给了异步流水线（上传→ASR→TTS→替换，数十秒）足够的时间窗，策略为「拦截发送 → 跑流水线 → 放行」。
+//
+// 血泪教训：钩子必须挂到「真正实现该方法的类」上，挂到持有者/调用者类上是死钩（编译通过、运行零反应）。
+// 40.8.0 二进制 classlist 反查确认的实现分布：
+//   recorderAnimationViewDidTapSendAudio:  -> AWEIMOptimizeAudioInputTouchView（新面板触摸层，UI 事件入口）
+//   audioInputTouchView*                   -> AWEIMAudioRecordController / AWEIMFormatAudioRecordController
+//   落盘发送：
+//     AWEIMAudioRecordController       .sendRecordMessageIfNeededWithFilePath:audioRecorder:   (NSString 路径)
+//     AWEIMFormatAudioRecordController .sendRecordMessageIfNeededWithData:audioRecorder:      (NSData，无落盘路径)
+//   录音器：AWEIMAudioMessageRecorder.url
+//
+// 策略：每个流程只在「终局发送点」拦截一次（避免双击重复发），全程打 AWECA-IM 日志自证；
+//       松手后有「发送 / 取消 / 转文字」确认面板，点发送才真正发消息，足够异步流水线跑完。
 
-// 拦截发送：返回 YES 表示已接管（调用方不要再 %orig），NO 表示直接放行
-static BOOL AWECAPrivateInterceptSend(id target, SEL sel, id arg, const char *tag) {
+#pragma mark - 私聊工具函数
+
+static NSString *AWECAPathFromValue(id v) {
+    if ([v isKindOfClass:[NSString class]]) return [(NSString *)v length] ? (NSString *)v : nil;
+    if ([v isKindOfClass:[NSURL class]]) return [(NSURL *)v path];
+    return nil;
+}
+
+// 运行时安全取值：不依赖编译期类型，避免头文件/类名漂移导致编译失败
+static id AWECASafeGet(id obj, NSString *name) {
+    if (!obj || !name.length) return nil;
+    SEL s = NSSelectorFromString(name);
+    if (![obj respondsToSelector:s]) return nil;
+    @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        return [obj performSelector:s];
+#pragma clang diagnostic pop
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+static NSString *AWECAPrivateTempPath(void) {
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"aweca_im"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    return [dir stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"im_%.0f.m4a", [[NSDate date] timeIntervalSince1970] * 1000]];
+}
+
+// Format 架构直接传 NSData（无落盘路径）：先把原声落地成临时文件，再走同一条流水线
+static NSString *AWECAPrivateMaterialize(NSData *data) {
+    if (![data isKindOfClass:[NSData class]] || data.length == 0) return nil;
+    NSString *p = AWECAPrivateTempPath();
+    return [data writeToFile:p atomically:YES] ? p : nil;
+}
+
+// 从入口自带值 / 控制器属性里找本次录音的真实文件路径（优先已存在的文件）
+static NSString *AWECAPrivateResolvePath(id primary, id ctrl) {
+    NSString *p = AWECAPathFromValue(primary);
+    if (p.length && [[NSFileManager defaultManager] fileExistsAtPath:p]) return p;
+    if (ctrl) {
+        for (NSString *name in @[@"recordFilePath", @"audioFilePath", @"filePath", @"recordPath"]) {
+            NSString *q = AWECAPathFromValue(AWECASafeGet(ctrl, name));
+            if (q.length && [[NSFileManager defaultManager] fileExistsAtPath:q]) return q;
+        }
+    }
+    return nil;
+}
+
+// 记录本次私聊录音的落盘路径（并按需兜底武装 + 尽早起跑流水线）
+static void AWECAPrivateNotePath(NSString *path) {
     AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
-    NSLog(@"AWECA-IM: [%s] send called path=%@ armed=%d skip=%d", tag, enhance.privateRecordPath, enhance.privateArmed, enhance.privateSkipOnce);
+    if (!path.length || !enhance.privateEnhanceEnabled) return;
+    if (!enhance.privateArmed) [enhance markPrivateTakeStarted];
+    enhance.privateRecordPath = path;
+    [enhance beginIfNeededAtPath:path];   // 趁用户停确认面板上，提前消化数十秒合成耗时
+}
+
+static void AWECACall1(id target, SEL sel, id a) {
+    if (!target || !sel) return;
+    ((void (*)(id, SEL, id))objc_msgSend)(target, sel, a);
+}
+static void AWECACall2(id target, SEL sel, id a, id b) {
+    if (!target || !sel) return;
+    ((void (*)(id, SEL, id, id))objc_msgSend)(target, sel, a, b);
+}
+
+// 发送闸门：返回 YES = 已接管（调用方不要再 %orig，由 fire 负责重放），NO = 直接放行。
+// fire 在流水线结束后于主线程回调，调用方在其中执行真正的发送（可带上替换后的音频）。
+static BOOL AWECAPrivateGate(const char *tag, NSString *path, void (^fire)(BOOL ok, NSString *message)) {
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSLog(@"AWECA-IM: [%s] send path=%@ armed=%d skip=%d",
+          tag, path, enhance.privateArmed, enhance.privateSkipOnce);
+
     if (enhance.privateSkipOnce) {
         enhance.privateSkipOnce = NO;
         NSLog(@"AWECA-IM: [%s] passthrough (already enhanced)", tag);
         return NO;
     }
-    if (![enhance shouldRunForPrivateRecording]) return NO;
+    if (path.length) enhance.privateRecordPath = path;
+    if (![enhance shouldRunForPrivateRecording]) {
+        NSLog(@"AWECA-IM: [%s] passthrough (not eligible)", tag);
+        return NO;
+    }
 
-    NSString *path = [enhance.privateRecordPath copy];
-    NSLog(@"AWECA-IM: [%s] INTERCEPT, enhancing %@", tag, path);
+    NSString *p = [path copy];
+    NSLog(@"AWECA-IM: [%s] INTERCEPT, enhancing %@", tag, p);
     [AWECAUtils showToast:@"识别合成中..." duration:2.0];
-    [enhance runPrivateEnhanceAtPath:path completion:^(BOOL ok, NSString *message) {
+    [enhance runPrivateEnhanceAtPath:p completion:^(BOOL ok, NSString *message) {
         NSLog(@"AWECA-IM: [%s] pipeline done ok=%d msg=%@", tag, ok, message);
-        if (message.length) [AWECAUtils showToast:message duration:2.5];
         enhance.privateSkipOnce = YES;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        [target performSelector:sel withObject:arg];
-#pragma clang diagnostic pop
-        [enhance resetPrivateTake];
+        if (message.length) [AWECAUtils showToast:message duration:2.5];
+        void (^safeFire)(void) = ^{
+            if (fire) fire(ok, message);
+            [enhance resetPrivateTake];
+        };
+        if ([NSThread isMainThread]) safeFire();
+        else dispatch_async(dispatch_get_main_queue(), safeFire);
     }];
     return YES;
 }
 
-%hook AWEIMAudioRecordController
+// ===== 新面板触摸层：UI 事件入口（40.8.0 私聊实际走这条）=====
+%hook AWEIMOptimizeAudioInputTouchView
 
-// 新版签名（带 action 参数，IPA 40.8.0 方法名池确认存在）
-- (void)audioRecorderDidFinishRecording:(id)recorder success:(BOOL)success action:(NSInteger)action error:(id)error {
+// 手势开始：武装私聊场景（兜底，控制器 delegate 的 TouchDown 也会武装）
+- (void)startRecord {
     %orig;
-    NSString *path = self.recordFilePath;
+    NSLog(@"AWECA-IM: touchView startRecord");
     AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
-    NSLog(@"AWECA-IM: CtrlDidFinish(action) success=%d path=%@", success, path);
-    if (success && path.length) enhance.privateRecordPath = path;
+    if (enhance.privateEnhanceEnabled) [enhance markPrivateTakeStarted];
 }
 
-// 旧版签名（与评论区同款，两个变体都 hook，真机确认哪个被触发后清理）
-- (void)audioRecorderDidFinishRecording:(id)recorder success:(BOOL)success error:(id)error {
+- (void)cancelRecord {
+    NSLog(@"AWECA-IM: touchView cancelRecord");
+    [[AWECARecordEnhance shared] markPrivateTakeCancelled];
     %orig;
-    NSString *path = self.recordFilePath;
-    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
-    NSLog(@"AWECA-IM: CtrlDidFinish(simple) success=%d path=%@", success, path);
-    if (success && path.length) enhance.privateRecordPath = path;
+}
+
+- (void)stopRecordWithInTranslate:(BOOL)inTranslate {
+    %orig;
+    NSLog(@"AWECA-IM: touchView stopRecord inTranslate=%d", inTranslate);
+    if (inTranslate) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+}
+
+// 取消：撤装，防止误拦截后续的发送
+- (void)recorderAnimationViewDidTapCancel:(id)view {
+    NSLog(@"AWECA-IM: touchView DidTapCancel");
+    [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+    %orig;
+}
+
+// 点「发送语音」：本层只放行，真正的拦截放在控制器终局发送点（避免双击重复发）
+- (void)recorderAnimationViewDidTapSendAudio:(id)view {
+    NSLog(@"AWECA-IM: touchView DidTapSendAudio (passthrough)");
+    %orig;
 }
 
 %end
 
-// 录音器层：新旧架构共用（控制器无论哪个类，_recorder 都是 IESIMAudioMessageRecorderInterface），
-// 录音落盘路径以这里为准，是最可靠的路径来源
+// ===== 老控制器（文件路径架构）=====
+%hook AWEIMAudioRecordController
+
+// 录音结束：记下路径并尽早起跑流水线
+- (void)audioRecorderDidFinishRecording:(id)recorder success:(BOOL)success action:(NSInteger)action error:(id)error {
+    %orig;
+    NSString *path = self.recordFilePath;
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSLog(@"AWECA-IM: CtrlDidFinish(action) success=%d action=%ld path=%@ armed=%d",
+          success, (long)action, path, enhance.privateArmed);
+    if (!success) return;
+    if (!path.length) path = AWECAPathFromValue(AWECASafeGet(recorder, @"url"));
+    AWECAPrivateNotePath(path);
+}
+
+// 手指按下：武装
+- (void)audioInputTouchViewTouchDownInside:(id)view {
+    %orig;
+    NSLog(@"AWECA-IM: CtrlTouchDown");
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    if (enhance.privateEnhanceEnabled) [enhance markPrivateTakeStarted];
+}
+
+// 抬起（取消 / 转文字）→ 撤装
+- (void)audioInputTouchViewTouchUpInside:(id)view cancelled:(BOOL)cancelled isInTranslate:(BOOL)isInTranslate {
+    %orig;
+    NSLog(@"AWECA-IM: CtrlTouchUp cancelled=%d isInTranslate=%d", cancelled, isInTranslate);
+    if (cancelled || isInTranslate) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+}
+
+- (void)audioInputTouchViewTouchUpOutside:(id)view cancelled:(BOOL)cancelled {
+    %orig;
+    NSLog(@"AWECA-IM: CtrlTouchUpOutside cancelled=%d", cancelled);
+    if (cancelled) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+}
+
+- (void)audioInputTouchViewDidTapCancel:(id)view {
+    NSLog(@"AWECA-IM: CtrlDidTapCancel");
+    [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+    %orig;
+}
+
+// 点「发送语音」（面板确认）：放行，由终局发送点统一拦截
+- (void)audioInputTouchViewDidTapSendAudio:(id)view {
+    NSLog(@"AWECA-IM: CtrlDidTapSendAudio (passthrough)");
+    %orig;
+}
+
+// 终局发送点（松手即发 / 面板确认都会走到这里）：拦截 → 跑流水线 → 重放
+- (void)sendRecordMessageIfNeededWithFilePath:(id)filePath audioRecorder:(id)recorder {
+    NSString *path = AWECAPrivateResolvePath(filePath, self);
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSLog(@"AWECA-IM: CtrlSend(file) raw=%@ path=%@ armed=%d", filePath, path, enhance.privateArmed);
+    AWECAPrivateNotePath(path);
+    if (AWECAPrivateGate("ctrl-file", path, ^(BOOL ok, NSString *m) {
+        // 流水线已原地覆盖 path，重放原方法即可带上合成音频
+        void (^go)(void) = ^{
+            AWECACall2(self, @selector(sendRecordMessageIfNeededWithFilePath:audioRecorder:), filePath, recorder);
+        };
+        if ([NSThread isMainThread]) go();
+        else dispatch_async(dispatch_get_main_queue(), go);
+    })) return;
+    %orig;
+}
+
+%end
+
+// ===== 新控制器（Format / NSData 架构）=====
+%hook AWEIMFormatAudioRecordController
+
+- (void)audioRecorderDidFinishRecording:(id)recorder success:(BOOL)success action:(NSInteger)action error:(id)error {
+    %orig;
+    NSString *path = AWECAPathFromValue(AWECASafeGet(recorder, @"url"));
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSLog(@"AWECA-IM: FormatDidFinish success=%d path=%@ armed=%d", success, path, enhance.privateArmed);
+    if (!success) return;
+    AWECAPrivateNotePath(path);
+}
+
+- (void)audioInputTouchViewTouchDownInside:(id)view {
+    %orig;
+    NSLog(@"AWECA-IM: FormatTouchDown");
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    if (enhance.privateEnhanceEnabled) [enhance markPrivateTakeStarted];
+}
+
+- (void)audioInputTouchViewTouchUpInside:(id)view cancelled:(BOOL)cancelled isInTranslate:(BOOL)isInTranslate {
+    %orig;
+    NSLog(@"AWECA-IM: FormatTouchUp cancelled=%d isInTranslate=%d", cancelled, isInTranslate);
+    if (cancelled || isInTranslate) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+}
+
+- (void)audioInputTouchViewTouchUpOutside:(id)view cancelled:(BOOL)cancelled {
+    %orig;
+    NSLog(@"AWECA-IM: FormatTouchUpOutside cancelled=%d", cancelled);
+    if (cancelled) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+}
+
+- (void)audioInputTouchViewDidTapCancel:(id)view {
+    NSLog(@"AWECA-IM: FormatDidTapCancel");
+    [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+    %orig;
+}
+
+- (void)audioInputTouchViewDidTapSendAudio:(id)view {
+    NSLog(@"AWECA-IM: FormatDidTapSendAudio (passthrough)");
+    %orig;
+}
+
+// 终局发送点：直接传 NSData（无落盘路径）→ 落地临时文件再走同一条流水线，
+// 流水线结束后读回文件内容，重新发送（失败则发原声）
+- (void)sendRecordMessageIfNeededWithData:(id)data audioRecorder:(id)recorder {
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSString *path = AWECAPrivateMaterialize(data);
+    NSLog(@"AWECA-IM: FormatSend(data) len=%lu path=%@ armed=%d",
+          (unsigned long)([data isKindOfClass:[NSData class]] ? ((NSData *)data).length : 0),
+          path, enhance.privateArmed);
+    AWECAPrivateNotePath(path);
+    if (AWECAPrivateGate("format-data", path, ^(BOOL ok, NSString *m) {
+        NSData *outData = ok ? [NSData dataWithContentsOfFile:path] : nil;
+        NSData *final = (outData.length ? outData
+                         : ([data isKindOfClass:[NSData class]] ? (NSData *)data : nil));
+        void (^go)(void) = ^{
+            AWECACall2(self, @selector(sendRecordMessageIfNeededWithData:audioRecorder:), final, recorder);
+        };
+        if ([NSThread isMainThread]) go();
+        else dispatch_async(dispatch_get_main_queue(), go);
+    })) return;
+    %orig;
+}
+
+%end
+
+// ===== 录音器层：兜底记录落盘路径 + 武装 =====
 %hook AWEIMAudioMessageRecorder
 
-- (void)audioEngineRecorder:(id)engine didFinishRecordingWithData:(id)data successfully:(BOOL)success {
+- (void)audioRecorderDidFinishRecording:(id)recorder successfully:(BOOL)success action:(NSInteger)action {
     %orig;
     NSString *path = self.url.path;
     AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
     NSLog(@"AWECA-IM: RecorderFinish success=%d path=%@ armed=%d", success, path, enhance.privateArmed);
     if (!success || !path.length) return;
-    // 兜底武装：若触摸按下事件未被 hook 到（新面板走别的入口），这里补齐
-    if (!enhance.privateArmed) [enhance markPrivateTakeStarted];
-    enhance.privateRecordPath = path;
-}
-
-%end
-
-%hook AWEIMDNewInputViewController
-
-// 手指按下：进入录音，武装私聊场景
-- (void)audioInputTouchViewTouchDownInside:(id)view {
-    %orig;
-    NSLog(@"AWECA-IM: TouchDown");
-    [[AWECARecordEnhance shared] markPrivateTakeStarted];
-}
-
-// 抬起（含 isInTranslate 变体）：取消 或 转文字模式都撤装
-- (void)audioInputTouchViewTouchUpInside:(id)view cancelled:(BOOL)cancelled isInTranslate:(BOOL)isInTranslate {
-    %orig;
-    NSLog(@"AWECA-IM: TouchUp(full) cancelled=%d isInTranslate=%d", cancelled, isInTranslate);
-    if (cancelled || isInTranslate) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
-}
-
-// 抬起（简单变体）
-- (void)audioInputTouchViewTouchUpInside:(id)view cancelled:(BOOL)cancelled {
-    %orig;
-    NSLog(@"AWECA-IM: TouchUp(simple) cancelled=%d", cancelled);
-    if (cancelled) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
-}
-
-// 抬起时手指在区域外（取消）
-- (void)audioInputTouchViewTouchUpOutside:(id)view cancelled:(BOOL)cancelled {
-    %orig;
-    NSLog(@"AWECA-IM: TouchUpOutside cancelled=%d", cancelled);
-    if (cancelled) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
-}
-
-// ===== 发送时机（真正的拦截点）=====
-
-// 新录音面板：点「发送语音」——40.8.0 私聊实际走这条
-- (void)recorderAnimationViewDidTapSendAudio:(id)view {
-    if (AWECAPrivateInterceptSend(self, @selector(recorderAnimationViewDidTapSendAudio:), view, "new-panel")) return;
-    %orig;
-}
-
-// 老录音面板：点「发送语音」
-- (void)audioInputTouchViewDidTapSendAudio:(id)view {
-    if (AWECAPrivateInterceptSend(self, @selector(audioInputTouchViewDidTapSendAudio:), view, "old-panel")) return;
-    %orig;
-}
-
-// 取消 / 转文字：撤装，防止误拦截后续的发送
-- (void)recorderAnimationViewDidTapCancel:(id)view {
-    %orig;
-    NSLog(@"AWECA-IM: panel DidTapCancel");
-    [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+    AWECAPrivateNotePath(path);
 }
 
 %end
