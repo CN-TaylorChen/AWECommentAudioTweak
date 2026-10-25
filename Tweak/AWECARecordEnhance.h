@@ -4,6 +4,8 @@
 #import <Foundation/Foundation.h>
 
 #define kAWECAEnhanceEnabled @"AWECAEnhanceEnabled"
+// 私聊转语音开关（默认跟随评论区：设置里可单独关闭）
+#define kAWECAPrivateEnhanceEnabled @"AWECAPrivateEnhanceEnabled"
 #define kAWECAStatusDotTag   19527
 // 识别资源 ID（留空 = 默认 2.0 标准版 volc.seedasr.auc；1.0 历史版填 volc.bigasr.auc）
 #define kAWECAASRResourceId  @"AWECAASRResourceId"
@@ -13,6 +15,8 @@
 + (instancetype)shared;
 
 @property (nonatomic, assign) BOOL enhanceEnabled;
+// 私聊（IM）场景转语音开关，与评论区各自独立
+@property (nonatomic, assign) BOOL privateEnhanceEnabled;
 @property (nonatomic, assign, readonly) BOOL armed;
 // 最近一次「取消录制」的时间戳（NSDate reference 时间；0 = 从未取消或已开新录音）。
 // 钩子用它识别「取消后紧跟的 DidFinishRecording 残留」——抖音取消时也会以 success:YES 回调。
@@ -27,7 +31,13 @@
 - (void)markCommentTakeStarted;
 - (void)markCommentTakeCancelled;
 
+// 私聊场景：触摸按下/抬起/取消（cancelled 参数由抖音触摸事件直接给出，比评论区 clear 启发式更准）
+- (void)markPrivateTakeStarted;
+- (void)markPrivateTakeCancelled;
+
 - (BOOL)shouldRunForCommentRecording;
+// 私聊录音是否走增强（开关 + armed + 凭证齐备）
+- (BOOL)shouldRunForPrivateRecording;
 - (BOOL)shouldSkipStickyReplaceForPath:(NSString *)path;
 
 - (void)beginIfNeededAtPath:(NSString *)path;
