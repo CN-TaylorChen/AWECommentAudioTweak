@@ -84,11 +84,37 @@ static void setupAudioInputElementHook(void);
 %end
 
 // 私聊（IM）录音转音色
-// 链路与评论区同构（IPA 40.8.0 离线确认）：
-//   AWEIMAudioRecordController（控制器，recordFilePath 拿路径）
-//   AWEIMAudioMessageRecorder（录音器）
-//   AWEIMDNewInputViewController（输入 VC，实现 AWEIMAudioInputTouchViewDelegate 触摸事件）
-// 触摸取消参数 cancelled 由抖音直接给出，比评论区 clear 启发式更准
+// 40.8.0 实测：私聊录音 UI 走新 delegate 家族 recorderAnimationView*（AWEIMRichRecorderAnimationViewDelegate），
+// 老的 audioInputTouchView* 是另一套面板。两套都 hook，谁被调用谁生效。
+// 关键点：私信语音松手后有「发送/取消/转文字」确认面板，点发送才真正发消息，
+// 这给了异步流水线（上传→ASR→TTS→替换，数十秒）足够的时间窗，策略为「拦截发送 → 跑流水线 → 放行」。
+
+// 拦截发送：返回 YES 表示已接管（调用方不要再 %orig），NO 表示直接放行
+static BOOL AWECAPrivateInterceptSend(id target, SEL sel, id arg, const char *tag) {
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSLog(@"AWECA-IM: [%s] send called path=%@ armed=%d skip=%d", tag, enhance.privateRecordPath, enhance.privateArmed, enhance.privateSkipOnce);
+    if (enhance.privateSkipOnce) {
+        enhance.privateSkipOnce = NO;
+        NSLog(@"AWECA-IM: [%s] passthrough (already enhanced)", tag);
+        return NO;
+    }
+    if (![enhance shouldRunForPrivateRecording]) return NO;
+
+    NSString *path = [enhance.privateRecordPath copy];
+    NSLog(@"AWECA-IM: [%s] INTERCEPT, enhancing %@", tag, path);
+    [AWECAUtils showToast:@"识别合成中..." duration:2.0];
+    [enhance runPrivateEnhanceAtPath:path completion:^(BOOL ok, NSString *message) {
+        NSLog(@"AWECA-IM: [%s] pipeline done ok=%d msg=%@", tag, ok, message);
+        if (message.length) [AWECAUtils showToast:message duration:2.5];
+        enhance.privateSkipOnce = YES;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [target performSelector:sel withObject:arg];
+#pragma clang diagnostic pop
+        [enhance resetPrivateTake];
+    }];
+    return YES;
+}
 
 %hook AWEIMAudioRecordController
 
@@ -97,10 +123,8 @@ static void setupAudioInputElementHook(void);
     %orig;
     NSString *path = self.recordFilePath;
     AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
-    NSLog(@"AWECA-IM: DidFinish(action) success=%d path=%@ armed=%d run=%d", success, path, enhance.privateArmed, [enhance shouldRunForPrivateRecording]);
-    if (success && [enhance shouldRunForPrivateRecording] && path.length) {
-        [enhance beginIfNeededAtPath:path];
-    }
+    NSLog(@"AWECA-IM: CtrlDidFinish(action) success=%d path=%@", success, path);
+    if (success && path.length) enhance.privateRecordPath = path;
 }
 
 // 旧版签名（与评论区同款，两个变体都 hook，真机确认哪个被触发后清理）
@@ -108,10 +132,25 @@ static void setupAudioInputElementHook(void);
     %orig;
     NSString *path = self.recordFilePath;
     AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
-    NSLog(@"AWECA-IM: DidFinish(simple) success=%d path=%@ armed=%d run=%d", success, path, enhance.privateArmed, [enhance shouldRunForPrivateRecording]);
-    if (success && [enhance shouldRunForPrivateRecording] && path.length) {
-        [enhance beginIfNeededAtPath:path];
-    }
+    NSLog(@"AWECA-IM: CtrlDidFinish(simple) success=%d path=%@", success, path);
+    if (success && path.length) enhance.privateRecordPath = path;
+}
+
+%end
+
+// 录音器层：新旧架构共用（控制器无论哪个类，_recorder 都是 IESIMAudioMessageRecorderInterface），
+// 录音落盘路径以这里为准，是最可靠的路径来源
+%hook AWEIMAudioMessageRecorder
+
+- (void)audioEngineRecorder:(id)engine didFinishRecordingWithData:(id)data successfully:(BOOL)success {
+    %orig;
+    NSString *path = self.url.path;
+    AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
+    NSLog(@"AWECA-IM: RecorderFinish success=%d path=%@ armed=%d", success, path, enhance.privateArmed);
+    if (!success || !path.length) return;
+    // 兜底武装：若触摸按下事件未被 hook 到（新面板走别的入口），这里补齐
+    if (!enhance.privateArmed) [enhance markPrivateTakeStarted];
+    enhance.privateRecordPath = path;
 }
 
 %end
@@ -121,6 +160,7 @@ static void setupAudioInputElementHook(void);
 // 手指按下：进入录音，武装私聊场景
 - (void)audioInputTouchViewTouchDownInside:(id)view {
     %orig;
+    NSLog(@"AWECA-IM: TouchDown");
     [[AWECARecordEnhance shared] markPrivateTakeStarted];
 }
 
@@ -143,6 +183,27 @@ static void setupAudioInputElementHook(void);
     %orig;
     NSLog(@"AWECA-IM: TouchUpOutside cancelled=%d", cancelled);
     if (cancelled) [[AWECARecordEnhance shared] markPrivateTakeCancelled];
+}
+
+// ===== 发送时机（真正的拦截点）=====
+
+// 新录音面板：点「发送语音」——40.8.0 私聊实际走这条
+- (void)recorderAnimationViewDidTapSendAudio:(id)view {
+    if (AWECAPrivateInterceptSend(self, @selector(recorderAnimationViewDidTapSendAudio:), view, "new-panel")) return;
+    %orig;
+}
+
+// 老录音面板：点「发送语音」
+- (void)audioInputTouchViewDidTapSendAudio:(id)view {
+    if (AWECAPrivateInterceptSend(self, @selector(audioInputTouchViewDidTapSendAudio:), view, "old-panel")) return;
+    %orig;
+}
+
+// 取消 / 转文字：撤装，防止误拦截后续的发送
+- (void)recorderAnimationViewDidTapCancel:(id)view {
+    %orig;
+    NSLog(@"AWECA-IM: panel DidTapCancel");
+    [[AWECARecordEnhance shared] markPrivateTakeCancelled];
 }
 
 %end
