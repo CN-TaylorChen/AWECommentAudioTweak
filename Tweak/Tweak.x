@@ -344,6 +344,7 @@ static BOOL AWECAPrivateGate(const char *tag, NSString *path, void (^fire)(BOOL 
 @end
 
 // ===== 新面板触摸层：UI 事件入口（40.8.0 私聊实际走这条）=====
+%hook AWEIMOptimizeAudioInputTouchView
 
 // 状态条挂载：加到触摸层的父视图（兄弟节点），位于「按住说话」上方 34pt
 - (void)aweca_ensurePill {
@@ -373,8 +374,6 @@ static BOOL AWECAPrivateGate(const char *tag, NSString *path, void (^fire)(BOOL 
     pill.frame = CGRectMake(x, y, w, 30);
     pill.hidden = self.hidden || self.alpha < 0.05 || self.frame.size.width < 40;
 }
-
-%hook AWEIMOptimizeAudioInputTouchView
 
 - (void)didMoveToSuperview {
     %orig;
