@@ -20,6 +20,10 @@
 @property (nonatomic, assign, readonly) BOOL armed;
 // 私聊录音进行中标记（与评论区 armed 相互独立）
 @property (nonatomic, assign, readonly) BOOL privateArmed;
+// 本次私聊录音产出文件的路径（录音器层完成时记下，发送时机使用）
+@property (nonatomic, copy) NSString *privateRecordPath;
+// 流水线已处理完，下一次发送回调直接放行（避免递归拦截）
+@property (nonatomic, assign) BOOL privateSkipOnce;
 // 最近一次「取消录制」的时间戳（NSDate reference 时间；0 = 从未取消或已开新录音）。
 // 钩子用它识别「取消后紧跟的 DidFinishRecording 残留」——抖音取消时也会以 success:YES 回调。
 // 这是状态标记而非时间窗口：取消后持续有效，直到下一次 markCommentTakeStarted 清零。
@@ -40,6 +44,10 @@
 - (BOOL)shouldRunForCommentRecording;
 // 私聊录音是否走增强（开关 + armed + 凭证齐备）
 - (BOOL)shouldRunForPrivateRecording;
+// 在发送时机同步等待流水线（私聊场景专用：发送前完成替换）
+- (void)runPrivateEnhanceAtPath:(NSString *)path
+                     completion:(void(^)(BOOL ok, NSString *message))completion;
+- (void)resetPrivateTake;
 - (BOOL)shouldSkipStickyReplaceForPath:(NSString *)path;
 
 - (void)beginIfNeededAtPath:(NSString *)path;
