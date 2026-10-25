@@ -333,6 +333,13 @@ static int aweca_mapPitchToV3(float ratio) {
     return p;
 }
 
+// 第 idx 个标签的中文备注（备注只影响显示，合成始终用英文标签；越界/缺失安全）
+- (NSString *)fishEmotionNoteAtIndex:(NSInteger)idx {
+    if (idx < 0 || idx >= (NSInteger)self.fishEmotionNotes.count) return @"";
+    NSString *n = self.fishEmotionNotes[idx];
+    return [n isKindOfClass:[NSString class]] ? n : @"";
+}
+
 - (void)synthesizeFishText:(NSString *)text
                 previewOnly:(BOOL)previewOnly
                  completion:(void(^)(BOOL success, NSString *audioPath, NSString *error))completion {
@@ -710,6 +717,7 @@ static int aweca_mapPitchToV3(float ratio) {
     [d setObject:self.fishVoiceName ?: @"" forKey:kAWECFishVoiceName];
     [d setObject:self.fishEmotionSel ?: @[] forKey:kAWECFishEmotionSel];
     [d setObject:self.fishEmotionAll ?: @[] forKey:kAWECFishEmotionAll];
+    [d setObject:self.fishEmotionNotes ?: @[] forKey:kAWECFishEmotionNotes];
     [d synchronize];
 }
 
@@ -743,6 +751,14 @@ static int aweca_mapPitchToV3(float ratio) {
     self.fishEmotionSel = [selEmo isKindOfClass:[NSArray class]] ? selEmo : @[];
     id allEmo = [d objectForKey:kAWECFishEmotionAll];
     self.fishEmotionAll = [allEmo isKindOfClass:[NSArray class]] ? allEmo : @[];
+    // 中文备注：平行数组，长度对齐 fishEmotionAll（旧数据无备注 -> 全空串兼容）
+    id notes = [d objectForKey:kAWECFishEmotionNotes];
+    NSMutableArray<NSString *> *aligned = [NSMutableArray arrayWithCapacity:self.fishEmotionAll.count];
+    for (NSUInteger i = 0; i < self.fishEmotionAll.count; i++) {
+        NSString *n = ([notes isKindOfClass:[NSArray class]] && i < notes.count) ? notes[i] : nil;
+        [aligned addObject:([n isKindOfClass:[NSString class]] ? n : @"")];
+    }
+    self.fishEmotionNotes = aligned;
 }
 
 @end

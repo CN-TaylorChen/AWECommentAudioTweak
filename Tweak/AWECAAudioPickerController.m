@@ -8,6 +8,7 @@
 #import "AWECATTSController.h"
 #import "AWECATTSVoiceListController.h"
 #import "AWECARecordEnhance.h"
+#import "AWECAAPISettingsController.h"
 #import "AWECATOSUploader.h"
 #import "AWECAUtils.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -1152,87 +1153,16 @@ static UIColor *AWECAOnPrimary(void) {
     return b;
 }
 
-// API 凭证 + 识别（TOS）设置合并面板
+// API 凭证：v1.4.6 改为分组设置页（火山 / Fish / 高级折叠，Key 可一键明文）
 - (void)aweca_showAPISettings {
-    AWECATTSManager *mgr = [AWECATTSManager shared];
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"API 凭证"
-                                                               message:@"合成：App ID + API Key\nFishAudio：填下方 Fish Key（fish.audio → API Keys）\n录音转音色（标准版识别）：再填下方 TOS 上传配置（私有桶 + 预签名URL）"
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"App ID";
-        tf.text = mgr.appID ?: @"";
-        tf.keyboardType = UIKeyboardTypeNumberPad;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"API Key";
-        tf.text = mgr.accessToken ?: @"";
-        tf.secureTextEntry = YES;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"FishAudio API Key";
-        tf.text = mgr.fishAPIKey ?: @"";
-        tf.secureTextEntry = YES;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"TOS AccessKey ID";
-        tf.text = [ud stringForKey:kAWECATOSAccessKey] ?: @"";
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"TOS SecretAccessKey";
-        tf.text = [ud stringForKey:kAWECATOSSecretKey] ?: @"";
-        tf.secureTextEntry = YES;
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Bucket 名称";
-        tf.text = [ud stringForKey:kAWECATOSBucket] ?: @"";
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"区域（留空=cn-beijing）";
-        tf.text = [ud stringForKey:kAWECATOSRegion] ?: @"";
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"识别资源ID（留空=volc.seedasr.auc）";
-        tf.text = [ud stringForKey:kAWECAASRResourceId] ?: @"";
-        tf.autocorrectionType = UITextAutocorrectionTypeNo;
-        tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        (void)action;
-        NSArray<UITextField *> *tfs = ac.textFields;
-        NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
-        mgr.appID = [tfs[0].text stringByTrimmingCharactersInSet:ws];
-        mgr.accessToken = [tfs[1].text stringByTrimmingCharactersInSet:ws];
-        mgr.fishAPIKey = [tfs[2].text stringByTrimmingCharactersInSet:ws];
-        [mgr saveConfig];
-        [ud setObject:[tfs[3].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSAccessKey];
-        [ud setObject:[tfs[4].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSSecretKey];
-        [ud setObject:[tfs[5].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSBucket];
-        [ud setObject:[tfs[6].text stringByTrimmingCharactersInSet:ws] forKey:kAWECATOSRegion];
-        [ud setObject:[tfs[7].text stringByTrimmingCharactersInSet:ws] forKey:kAWECAASRResourceId];
-        [ud synchronize];
-        if ([AWECATOSUploader hasCredentials]) {
-            [AWECAUtils showToast:@"已保存" duration:1.5];
-        } else {
-            [AWECAUtils showToast:@"已保存，但 TOS AK/SK/Bucket 不完整将无法录音转音色" duration:2.0];
-        }
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
+    AWECAAPISettingsController *api = [[AWECAAPISettingsController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:api animated:YES];
+    } else {
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:api];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        [self presentViewController:nav animated:YES completion:nil];
+    }
 }
 
 #pragma mark - 刷新

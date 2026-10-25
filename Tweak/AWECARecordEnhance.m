@@ -62,6 +62,12 @@ static NSString *AWECAASRCodeHint(NSString *code) {
 @property (nonatomic, assign) BOOL finishedOnce;
 @property (nonatomic, assign) NSUInteger pipelineEpoch;
 @property (nonatomic, assign) BOOL cancelledTake; // 取消后待消费的残留标记，供钩子识别取消的 DidFinishRecording
+// 私聊快照隔离：源路径(抖音复用的活文件) -> 副本路径(插件私有副本)
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *snapMap;
+// 当前在飞流水线对应的源路径（取消精确作废用：只有取消的是"这一条"才作废流水线）
+@property (nonatomic, copy) NSString *inFlightSourcePath;
+// 已被用户取消、尚未等到结果的排队 waiter 的流水线路径（按路径精确取消，不再用全局 abort 串台）
+@property (nonatomic, strong) NSMutableSet<NSString *> *abortedWaiterPaths;
 @end
 
 @implementation AWECARecordEnhance
@@ -72,6 +78,8 @@ static NSString *AWECAASRCodeHint(NSString *code) {
     dispatch_once(&once, ^{
         inst = [[AWECARecordEnhance alloc] init];
         inst.waiters = [NSMutableArray array];
+        inst.snapMap = [NSMutableDictionary dictionary];
+        inst.abortedWaiterPaths = [NSMutableSet set];
         inst->_enhanceEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:kAWECAEnhanceEnabled];
         // 私聊开关默认跟随评论区（未设置过时取评论区值）
         if ([[NSUserDefaults standardUserDefaults] objectForKey:kAWECAPrivateEnhanceEnabled] == nil) {
@@ -146,11 +154,34 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
 
 - (void)markPrivateTakeCancelled {
     self.privateArmed = NO;
+    NSString *cancelledPath = self.privateRecordPath;
     self.privateRecordPath = nil;
     // 先置取消标记再作废流水线：作废会同步 flush waiter（gate 回调），回调里凭此标记拒绝补发消息，
     // 避免「取消过程中同步发消息」把抖音录音 UI 状态弄乱（表现为必须重进会话才能再录音）
     self.privateAborted = YES;
-    [self invalidatePipeline:@"已取消，保留原声"];
+    // v1.4.6 精确作废：只有取消的正是「在飞流水线对应的那一条」才作废。
+    // 旧做法无条件 invalidatePipeline：下一条录音的按下/取消会误杀上一条还在跑的流水线
+    // （其 gate 回调被"已取消"拒绝 -> 上一条消息被静默丢弃），也会把 privateAborted 串给新任务
+    if (cancelledPath.length && self.inFlightSourcePath.length &&
+        [self.inFlightSourcePath isEqualToString:cancelledPath]) {
+        [self invalidatePipeline:@"已取消，保留原声"];
+    } else if (cancelledPath.length) {
+        // 排队中的那条被取消：标记其快照路径，flush 时以"已取消"唤醒（不重放、不误伤别条）
+        NSString *snap = self.snapMap[cancelledPath];
+        if (snap.length) {
+            for (NSDictionary *entry in self.waiters) {
+                if ([entry[@"path"] isEqualToString:snap]) {
+                    [self.abortedWaiterPaths addObject:snap];
+                    break;
+                }
+            }
+        }
+    }
+    // 快照映射定期修剪：只留最近 8 条，防止长时间聊天内存缓慢增长
+    while (self.snapMap.count > 8) {
+        NSString *first = self.snapMap.allKeys.firstObject;
+        [self.snapMap removeObjectForKey:first];
+    }
 }
 
 // 作废当前流水线：epoch++ 使所有迟到回调被防护挡下（不 install、不写缓存、不假 toast）
@@ -159,6 +190,7 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     self.pipelineEpoch += 1;
     self.finishedOnce = YES;
     self.busy = NO;
+    self.inFlightSourcePath = nil;
     NSString *p = self.inFlightPath; // 先保存再清空：flush 时让路径匹配的 waiter 收到取消消息（而非"任务冲突"）
     self.inFlightPath = nil;
     self.inFlightStamp = nil;
@@ -221,6 +253,76 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     [self waitForEnhancedPath:path completion:nil];
 }
 
+#pragma mark - 私聊快照隔离（v1.4.6）
+
++ (BOOL)isPluginOwnedPath:(NSString *)path {
+    return path.length > 0 && [path containsString:@"/aweca_im/"];
+}
+
+// 把源文件复制成插件私有副本（保留扩展名；副本彼此唯一，永不复用）
+- (NSString *)aweca_makeSnapshotOfSourcePath:(NSString *)src {
+    if (!src.length) return nil;
+    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:src error:nil];
+    if (!attr || attr.fileSize == 0) return nil;   // 源文件不存在/为空（取消残留）——不建快照
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"aweca_im"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    static dispatch_once_t onceToken;
+    static NSString *bootTag;
+    dispatch_once(&onceToken, ^{ bootTag = [NSString stringWithFormat:@"%d", arc4random()]; });
+    NSString *snap = [dir stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"snap_%@_%u%@",
+         bootTag, arc4random(), src.pathExtension.length ? [@"." stringByAppendingString:src.pathExtension] : @""]];
+    NSError *err = nil;
+    if (![[NSFileManager defaultManager] copyItemAtPath:src toPath:snap error:&err]) {
+        NSLog(@"AWECA-IM: snapshot copy failed %@ -> %@ err=%@", src, snap, err);
+        return nil;
+    }
+    NSLog(@"AWECA-IM: snapshot %@ -> %@", src, snap);
+    return snap;
+}
+
+// 源路径 -> 快照路径（已有映射则复用，流水线已在副本上跑；否则补一份快照）
+- (NSString *)aweca_snapshotForSourcePath:(NSString *)src {
+    if (![AWECARecordEnhance isPluginOwnedPath:src]) {
+        NSString *existing = self.snapMap[src];
+        if (existing.length) return existing;
+        NSString *snap = [self aweca_makeSnapshotOfSourcePath:src];
+        if (snap.length) self.snapMap[src] = snap;
+        return snap;
+    }
+    return src;   // 本来就是插件自有副本（Format 架构落盘的临时文件），直接用
+}
+
+- (void)privateBeginForSourcePath:(NSString *)sourcePath {
+    if (!sourcePath.length) return;
+    NSString *snap = [self aweca_snapshotForSourcePath:sourcePath];
+    if (!snap.length) return;
+    if (!self.busy) self.inFlightSourcePath = sourcePath;
+    [self waitForEnhancedPath:snap completion:nil];
+}
+
+- (void)privateWaitForSourcePath:(NSString *)sourcePath
+                      completion:(void(^)(BOOL ok, NSString *message))completion {
+    if (!sourcePath.length) {
+        if (completion) completion(NO, nil);
+        return;
+    }
+    NSString *snap = [self aweca_snapshotForSourcePath:sourcePath];
+    if (!snap.length) {
+        // 快照失败 = 源文件已不在（取消残留/被清掉）：不跑流水线、不重放
+        if (completion) completion(NO, @"录音文件不存在，已取消发送");
+        return;
+    }
+    if (!self.busy) self.inFlightSourcePath = sourcePath;
+    [self waitForEnhancedPath:snap completion:completion];
+}
+
+- (NSString *)snapshotPathForSourcePath:(NSString *)sourcePath {
+    if ([AWECARecordEnhance isPluginOwnedPath:sourcePath]) return sourcePath;
+    return self.snapMap[sourcePath];
+}
+
 - (void)waitForEnhancedPath:(NSString *)path
                  completion:(void(^)(BOOL ok, NSString *message))completion {
     if (!path.length) {
@@ -253,22 +355,38 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     [self startPipelineAtPath:path];
 }
 
-// 只唤醒路径匹配的等待者；不匹配的（旧流水线结束时挂进来的新路径）以冲突失败唤醒，
-// 避免旧结果张冠李戴（toast 假成功、时长按错文件算、新录音实际未增强）
+// 只唤醒路径匹配的等待者；不匹配的（排队中的下一条）不再当冲突丢弃——
+// 快照化后每条录音的流水线路径彼此不同，旧做法会把下一条误判成冲突。
+// 正确行为：流水线结束后自动起跑队列中下一条的流水线，其 waiter 继续等待。
+// 用户已取消的那条（abortedWaiterPaths 命中）以"已取消"唤醒，绝不重放。
 - (void)flushWaitersOk:(BOOL)ok path:(NSString *)path message:(NSString *)msg {
     NSArray *list = [self.waiters copy];
     [self.waiters removeAllObjects];
+    NSMutableArray *queued = [NSMutableArray array];
     for (NSDictionary *entry in list) {
         void (^cb)(BOOL, NSString *) = entry[@"block"];
         NSString *wPath = entry[@"path"];
-        BOOL match = (path.length > 0 && [wPath isEqualToString:path]);
         // 逐个异常隔离：单个 waiter 回调抛异常（如回调里消息发到已析构对象）绝不能向上冒泡——
         // 否则会打断调用方（取消钩子里 %orig 还没执行，抖音原生录音状态就卡死）
         @try {
-            cb(match ? ok : NO, match ? msg : @"与上一个任务冲突，请重试");
+            if (path.length > 0 && [wPath isEqualToString:path]) {
+                [self.abortedWaiterPaths removeObject:wPath];
+                cb(ok, msg);
+            } else if ([self.abortedWaiterPaths containsObject:wPath]) {
+                [self.abortedWaiterPaths removeObject:wPath];
+                cb(NO, @"已取消，保留原声");
+            } else {
+                [queued addObject:entry];
+            }
         } @catch (NSException *e) {
             NSLog(@"AWECA-IM: waiter exception swallowed: %@", e);
         }
+    }
+    self.waiters = queued;
+    // 队列不为空且流水线已空闲：起跑下一条（其 waiter 留在队列里等完成回调）
+    if (queued.count > 0 && !self.busy) {
+        NSString *next = queued[0][@"path"];
+        if (next.length) [self startPipelineAtPath:next];
     }
 }
 
@@ -279,6 +397,7 @@ static void AWECAWalkHideStatusDots(UIView *v, BOOL hide) {
     self.busy = NO;
     self.inFlightPath = nil;
     self.inFlightStamp = nil;
+    self.inFlightSourcePath = nil;
     self.lastMessage = msg;
     NSString *stamp = [self fileStampForPath:path];
     if (ok && stamp.length) {

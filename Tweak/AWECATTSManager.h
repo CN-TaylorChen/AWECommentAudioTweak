@@ -29,9 +29,10 @@
 #define kAWECFishVoiceName    @"AWECFishVoiceName"
 #define kAWECFishEmotionSel   @"AWECFishEmotionSel"   // 已勾选的情绪标签（含括号，如 [chuckle]）
 #define kAWECFishEmotionAll   @"AWECFishEmotionAll"   // 全部可选情绪标签
+#define kAWECFishEmotionNotes @"AWECFishEmotionNotes" // 情绪标签的中文备注（与 All 平行数组，空串=无备注，仅显示用）
 
 #define AWECAProductName   @"声临"
-#define AWECAVersion       @"1.4.5"
+#define AWECAVersion       @"1.4.6"
 
 @class UIImage;
 
@@ -56,6 +57,7 @@
 @property (nonatomic, copy) NSString *fishVoiceName;
 @property (nonatomic, copy) NSArray<NSString *> *fishEmotionSel;
 @property (nonatomic, copy) NSArray<NSString *> *fishEmotionAll;
+@property (nonatomic, copy) NSArray<NSString *> *fishEmotionNotes;  // 与 fishEmotionAll 平行；越界/缺失=无备注
 
 @property (nonatomic, assign) float speedRatio;
 @property (nonatomic, assign) float volumeRatio;
@@ -90,6 +92,8 @@
 - (void)deleteFishAvatarForVoiceID:(NSString *)vid;
 // 已勾选情绪标签拼成的前缀（无勾选时返回 @""）
 - (NSString *)fishEmotionPrefix;
+// 第 idx 个标签的中文备注（无备注返回 @""；越界安全）
+- (NSString *)fishEmotionNoteAtIndex:(NSInteger)idx;
 
 - (void)applyVolcanoHTTPAuthToRequest:(NSMutableURLRequest *)request;
 

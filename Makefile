@@ -12,6 +12,7 @@ Shenglin_FILES = Tweak/Tweak.x \
 	Tweak/AWECADownloadManager.m \
 	Tweak/AWECAAudioReplacer.m \
 	Tweak/AWECAAudioPickerController.m \
+	Tweak/AWECAAPISettingsController.m \
 	Tweak/AWECAUtils.m \
 	Tweak/AWECATTSManager.m \
 	Tweak/AWECATTSController.m \

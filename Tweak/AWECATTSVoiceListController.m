@@ -126,23 +126,31 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (void)aweca_addEmotionTag {
     AWECATTSManager *mgr = [AWECATTSManager shared];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"添加情绪标签"
-        message:[NSString stringWithFormat:@"如 chuckle、whisper（当前模型 %@ 将自动加 %@）",
+        message:[NSString stringWithFormat:@"情绪标签填英文（如 chuckle、whisper），当前模型 %@ 将自动加 %@；备注填中文，仅用于显示",
                  mgr.fishModel ?: @"s2.1-pro-free",
                  [mgr.fishModel isEqualToString:@"s1"] ? @"圆括号" : @"方括号"]
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"标签内容（可不带括号）";
+        tf.placeholder = @"备注（选填，中文，如：开心 · 活泼一点）";
+    }];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"情绪标签（英文，如 happy）";
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *tag = [self.class aweca_wrapEmotionTag:alert.textFields[0].text ?: @""];
+        NSString *tag = [self.class aweca_wrapEmotionTag:alert.textFields[1].text ?: @""];
         if (!tag.length) { [AWECAUtils showToast:@"标签不能为空"]; return; }
         NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
         if ([all containsObject:tag]) { [AWECAUtils showToast:@"该标签已存在"]; return; }
         [all addObject:tag];
         mgr.fishEmotionAll = all;
+        // 备注平行数组同步插入
+        NSMutableArray *notes = [mgr.fishEmotionNotes mutableCopy] ?: [NSMutableArray array];
+        while (notes.count < all.count - 1) [notes addObject:@""];
+        [notes addObject:([alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"")];
+        mgr.fishEmotionNotes = notes;
         [mgr saveConfig];
         [self.tableView reloadData];
         if (self.onEmotionsChanged) self.onEmotionsChanged();
@@ -155,15 +163,21 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     if (idx < 0 || idx >= (NSInteger)mgr.fishEmotionAll.count) return;
     NSString *old = mgr.fishEmotionAll[idx];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"编辑情绪标签"
-        message:old preferredStyle:UIAlertControllerStyleAlert];
+        message:@"备注填中文仅用于显示；情绪标签填英文，改标签会自动同步已选状态"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [mgr fishEmotionNoteAtIndex:idx];
+        tf.placeholder = @"备注（选填，中文，仅显示用）";
+    }];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = [self.class aweca_stripEmotionTag:old];
+        tf.placeholder = @"情绪标签（英文）";
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *tag = [self.class aweca_wrapEmotionTag:alert.textFields[0].text ?: @""];
+        NSString *tag = [self.class aweca_wrapEmotionTag:alert.textFields[1].text ?: @""];
         if (!tag.length) { [AWECAUtils showToast:@"标签不能为空"]; return; }
         NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
         NSMutableArray *sel = [mgr.fishEmotionSel mutableCopy];
@@ -173,6 +187,11 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         if (wasSel && ![sel containsObject:tag]) [sel addObject:tag];
         mgr.fishEmotionAll = all;
         mgr.fishEmotionSel = sel;
+        // 备注同步更新（长度对齐）
+        NSMutableArray *notes = [mgr.fishEmotionNotes mutableCopy] ?: [NSMutableArray array];
+        while (notes.count < all.count) [notes addObject:@""];
+        notes[idx] = [alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+        mgr.fishEmotionNotes = notes;
         [mgr saveConfig];
         [self.tableView reloadData];
         if (self.onEmotionsChanged) self.onEmotionsChanged();
@@ -389,8 +408,24 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
     if (self.emotionMode) {
         NSString *tag = mgr.fishEmotionAll[indexPath.row];
-        cell.textLabel.text = tag;
-        cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        NSString *note = [mgr fishEmotionNoteAtIndex:indexPath.row];
+        // 双语显示：有备注 -> 大字中文备注 + 灰色等宽小字英文标签；无备注 -> 标签原文
+        if (note.length) {
+            NSMutableAttributedString *as = [[NSMutableAttributedString alloc] init];
+            [as appendAttributedString:[[NSAttributedString alloc] initWithString:note attributes:@{
+                NSFontAttributeName: [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold],
+                NSForegroundColorAttributeName: [UIColor labelColor]}]];
+            [as appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"\n%@", tag] attributes:@{
+                NSFontAttributeName: [UIFont monospacedSystemFontOfSize:11.5 weight:UIFontWeightRegular],
+                NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}]];
+            cell.textLabel.attributedText = as;
+            cell.textLabel.numberOfLines = 2;
+        } else {
+            cell.textLabel.attributedText = [[NSAttributedString alloc] initWithString:tag attributes:@{
+                NSFontAttributeName: [UIFont systemFontOfSize:15 weight:UIFontWeightMedium],
+                NSForegroundColorAttributeName: [UIColor labelColor]}];
+            cell.textLabel.numberOfLines = 1;
+        }
         if ([mgr.fishEmotionSel containsObject:tag]) {
             cell.accessoryType = UITableViewCellAccessoryCheckmark;
         }
@@ -498,6 +533,12 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
             [sel removeObject:tag];
             mgr.fishEmotionAll = all;
             mgr.fishEmotionSel = sel;
+            // 备注平行数组同步删除
+            if (idx < (NSInteger)mgr.fishEmotionNotes.count) {
+                NSMutableArray *notes = [mgr.fishEmotionNotes mutableCopy];
+                [notes removeObjectAtIndex:idx];
+                mgr.fishEmotionNotes = notes;
+            }
             [mgr saveConfig];
             [tableView performBatchUpdates:^{
                 [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];

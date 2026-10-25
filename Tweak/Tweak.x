@@ -7,8 +7,11 @@
 #import "AWECAAudioReplacer.h"
 #import "AWECACommentHeaderButton.h"
 #import "AWECARecordEnhance.h"
+#import "AWECATTSManager.h"
+#import "AWECAAudioPickerController.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <UIKit/UIKit.h>
 
 static void setupAudioIconElementHook(void);
 static void setupAudioInputElementHook(void);
@@ -149,12 +152,15 @@ static NSString *AWECAPrivateResolvePath(id primary, id ctrl) {
 }
 
 // 记录本次私聊录音的落盘路径（并按需兜底武装 + 尽早起跑流水线）
+// v1.4.6：起跑前先复制快照——抖音私聊每条录音复用同一路径，流水线绝不在活文件上转换
 static void AWECAPrivateNotePath(NSString *path) {
     AWECARecordEnhance *enhance = [AWECARecordEnhance shared];
     if (!path.length || !enhance.privateEnhanceEnabled) return;
+    // 重放再入护栏：重放带的是插件自有快照路径，不是新录音，绝不能武装/覆盖 privateRecordPath
+    if ([AWECARecordEnhance isPluginOwnedPath:path]) return;
     if (!enhance.privateArmed) [enhance markPrivateTakeStarted];
     enhance.privateRecordPath = path;
-    [enhance beginIfNeededAtPath:path];   // 趁用户停确认面板上，提前消化数十秒合成耗时
+    [enhance privateBeginForSourcePath:path];   // 趁用户停确认面板上，提前消化数十秒合成耗时
 }
 
 static void AWECACall2(id target, SEL sel, id a, id b) {
@@ -183,12 +189,16 @@ static BOOL AWECAPrivateGate(const char *tag, NSString *path, void (^fire)(BOOL 
     NSString *p = [path copy];
     NSLog(@"AWECA-IM: [%s] INTERCEPT, enhancing %@", tag, p);
     [AWECAUtils showToast:@"识别合成中..." duration:2.0];
-    [enhance runPrivateEnhanceAtPath:p completion:^(BOOL ok, NSString *message) {
+    // v1.4.6 快照隔离：流水线只对插件私有副本转换，抖音复用的活路径全程不被触碰；
+    // 已取消（message 含"已取消"）绝不补发——取消过程中同步发消息会弄乱抖音录音 UI
+    [enhance privateWaitForSourcePath:p completion:^(BOOL ok, NSString *message) {
         NSLog(@"AWECA-IM: [%s] pipeline done ok=%d msg=%@ aborted=%d",
               tag, ok, message, enhance.privateAborted);
         if (message.length) [AWECAUtils showToast:message duration:2.5];
-        // 用户已取消本次发送（取消会同步 flush waiter 走到这里）：结果作废，绝不补发——
-        // 否则会在取消过程中发消息，把抖音录音 UI 状态弄乱（重进会话才能再录音）
+        if (!ok && [message containsString:@"已取消"]) {
+            [enhance resetPrivateTake];
+            return;
+        }
         if (enhance.privateAborted) {
             [enhance resetPrivateTake];
             return;
@@ -208,8 +218,173 @@ static BOOL AWECAPrivateGate(const char *tag, NSString *path, void (^fire)(BOOL 
     return YES;
 }
 
+#pragma mark - 私聊声临状态条（v1.4.6）
+
+// 状态条按钮：挂在「按住说话」触摸层的父视图上（兄弟节点而非子视图），
+// 彻底避开触摸层的手势树——点胶囊绝不会触发按住说话；
+// 表情面板弹出时抖音收起语音面板，胶囊作为语音面板层的邻居一起隐藏。
+#define kAWECIMSetTag 19529
+
+@interface AWECAIMSetPillButton : UIButton
+- (void)aweca_refreshPill;
+@end
+
+@implementation AWECAIMSetPillButton
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.tag = kAWECIMSetTag;
+        self.layer.cornerRadius = 15;
+        self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.92];
+        self.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        // 标题用内部 UILabel（避开 iOS15 SDK 弃用的 contentEdgeInsets/titleEdgeInsets，-Werror）
+        UILabel *lab = [[UILabel alloc] initWithFrame:CGRectZero];
+        lab.tag = 19533;
+        lab.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        lab.textColor = [UIColor whiteColor];
+        lab.userInteractionEnabled = NO;
+        [self addSubview:lab];
+        // 左侧电源小点：一键开关私聊转音色
+        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(12, 0, 8, 8)];
+        dot.layer.cornerRadius = 4;
+        dot.userInteractionEnabled = NO;
+        dot.tag = 19530;
+        [self addSubview:dot];
+        // 右侧齿轮
+        UILabel *gear = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 18, 18)];
+        gear.text = @"⚙︎";
+        gear.font = [UIFont systemFontOfSize:13];
+        gear.textAlignment = NSTextAlignmentRight;
+        gear.userInteractionEnabled = NO;
+        gear.tag = 19531;
+        [self addSubview:gear];
+        // 整条点击 = 打开设置（电源点单独一块区域负责开关）
+        [self addTarget:self action:@selector(aweca_openSettings) forControlEvents:UIControlEventTouchUpInside];
+        // 电源点：单独一个透明按钮盖在点上
+        UIButton *power = [UIButton buttonWithType:UIButtonTypeSystem];
+        power.frame = CGRectMake(2, 0, 28, 40);
+        power.tag = 19532;
+        [power addTarget:self action:@selector(aweca_togglePower) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:power];
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    UIView *dot = [self viewWithTag:19530];
+    UILabel *gear = [self viewWithTag:19531];
+    UILabel *lab = (UILabel *)[self viewWithTag:19533];
+    UIButton *power = (UIButton *)[self viewWithTag:19532];
+    dot.center = CGPointMake(16, self.bounds.size.height / 2);
+    power.frame = CGRectMake(2, 0, 28, self.bounds.size.height);
+    gear.frame = CGRectMake(self.bounds.size.width - 24, (self.bounds.size.height - 18) / 2, 16, 18);
+    CGFloat textX = 28, textW = self.bounds.size.width - 28 - 26;
+    lab.frame = CGRectMake(textX, 0, textW, self.bounds.size.height);
+    lab.textAlignment = NSTextAlignmentCenter;
+    lab.adjustsFontSizeToFitWidth = YES;
+    lab.minimumScaleFactor = 0.75;
+}
+
+- (void)aweca_refreshPill {
+    AWECARecordEnhance *enh = [AWECARecordEnhance shared];
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    BOOL on = enh.privateEnhanceEnabled;
+    NSString *engine = mgr.fishEngine ? @"Fish" : @"火山";
+    NSString *voice = mgr.fishEngine
+        ? (mgr.fishVoiceName.length ? mgr.fishVoiceName : @"未选音色")
+        : (mgr.voiceName.length ? mgr.voiceName : @"未选音色");
+    NSString *title = on ? [NSString stringWithFormat:@"声临 · %@（%@）", voice, engine]
+                         : @"声临 · 已关闭";
+    UILabel *lab = (UILabel *)[self viewWithTag:19533];
+    if (![lab.text isEqualToString:title]) lab.text = title;
+
+    if (on) {
+        self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.92];
+        lab.textColor = [UIColor whiteColor];
+    } else {
+        self.backgroundColor = [UIColor colorWithWhite:0.16 alpha:0.85];
+        lab.textColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+    }
+    UIView *dot = [self viewWithTag:19530];
+    dot.backgroundColor = on ? [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1]
+                             : [UIColor colorWithWhite:0.45 alpha:1];
+}
+
+- (void)aweca_togglePower {
+    AWECARecordEnhance *enh = [AWECARecordEnhance shared];
+    enh.privateEnhanceEnabled = !enh.privateEnhanceEnabled;
+    [self aweca_refreshPill];
+    [AWECAUtils showToast:enh.privateEnhanceEnabled ? @"私聊转音色已开启" : @"私聊转音色已关闭（发原声）" duration:1.5];
+}
+
+- (void)aweca_openSettings {
+    UIViewController *topVC = [AWECAUtils topViewController];
+    if (!topVC) return;
+    // 键盘/录音状态先收起，避免弹层与录音面板叠加
+    [topVC.view endEditing:YES];
+    AWECAAudioPickerController *picker = [[AWECAAudioPickerController alloc] init];
+    picker.embeddedInCommentTab = YES;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:picker];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    if (@available(iOS 15.0, *)) {
+        UISheetPresentationController *sheet = nav.sheetPresentationController;
+        if (sheet) {
+            sheet.detents = @[
+                UISheetPresentationControllerDetent.mediumDetent,
+                UISheetPresentationControllerDetent.largeDetent
+            ];
+            sheet.prefersGrabberVisible = YES;
+        }
+    }
+    [topVC presentViewController:nav animated:YES completion:nil];
+}
+
+@end
+
 // ===== 新面板触摸层：UI 事件入口（40.8.0 私聊实际走这条）=====
+
+// 状态条挂载：加到触摸层的父视图（兄弟节点），位于「按住说话」上方 34pt
+- (void)aweca_ensurePill {
+    UIView *host = self.superview;
+    if (!host) return;
+    AWECAIMSetPillButton *pill = (AWECAIMSetPillButton *)[host viewWithTag:kAWECIMSetTag];
+    if (!pill) {
+        pill = [[AWECAIMSetPillButton alloc] initWithFrame:CGRectMake(0, 0, 100, 32)];
+        pill.translatesAutoresizingMaskIntoConstraints = NO;
+        [host addSubview:pill];
+    }
+    [pill aweca_refreshPill];
+    pill.hidden = self.hidden || self.alpha < 0.05 || self.frame.size.width < 40;
+}
+
+- (void)aweca_layoutPill {
+    UIView *host = self.superview;
+    if (!host) return;
+    AWECAIMSetPillButton *pill = (AWECAIMSetPillButton *)[host viewWithTag:kAWECIMSetTag];
+    if (!pill) return;
+    CGRect mine = [self convertRect:self.bounds toView:host];
+    CGFloat w = mine.size.width - 24;
+    if (w < 120) w = host.bounds.size.width - 24;
+    CGFloat x = (host.bounds.size.width - w) / 2;
+    CGFloat y = mine.origin.y - 34;
+    if (y < 2) y = 2;   // 上方空间不足时兜底，绝不悬浮到屏幕外
+    pill.frame = CGRectMake(x, y, w, 30);
+    pill.hidden = self.hidden || self.alpha < 0.05 || self.frame.size.width < 40;
+}
+
 %hook AWEIMOptimizeAudioInputTouchView
+
+- (void)didMoveToSuperview {
+    %orig;
+    @try { [self aweca_ensurePill]; } @catch (NSException *e) {}
+}
+
+- (void)layoutSubviews {
+    %orig;
+    @try { [self aweca_ensurePill]; [self aweca_layoutPill]; } @catch (NSException *e) {}
+}
 
 // 手势开始：武装私聊场景（兜底，控制器 delegate 的 TouchDown 也会武装）
 - (void)startRecord {
@@ -316,11 +491,15 @@ static BOOL AWECAPrivateGate(const char *tag, NSString *path, void (^fire)(BOOL 
     NSLog(@"AWECA-IM: CtrlSend(file) raw=%@ path=%@ armed=%d", filePath, path, enhance.privateArmed);
     @try { AWECAPrivateNotePath(path); } @catch (NSException *e) {}
     if (AWECAPrivateGate("ctrl-file", path, ^(BOOL ok, NSString *m) {
-        // 流水线已原地覆盖 path，重放原方法即可带上合成音频
+        // v1.4.6 快照重放：发的始终是副本路径（成功=合成音频，失败=原声副本）。
+        // 旧做法成功时发原路径——若期间用户已录下一条（抖音复用同一路径），
+        // 发出去的会是下一条的声音；失败时发原路径也可能拿到被改动的内容
+        NSString *snap = [enhance snapshotPathForSourcePath:path];
+        NSString *replayPath = (snap.length && [[NSFileManager defaultManager] fileExistsAtPath:snap]) ? snap : path;
         void (^go)(void) = ^{
             __strong id sctrl = wctrl;
             if (!sctrl) { NSLog(@"AWECA-IM: ctrl-file replay skipped (controller gone)"); return; }
-            AWECACall2(sctrl, @selector(sendRecordMessageIfNeededWithFilePath:audioRecorder:), filePath, recorder);
+            AWECACall2(sctrl, @selector(sendRecordMessageIfNeededWithFilePath:audioRecorder:), replayPath, recorder);
         };
         if ([NSThread isMainThread]) go();
         else dispatch_async(dispatch_get_main_queue(), go);
