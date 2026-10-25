@@ -752,10 +752,11 @@ static int aweca_mapPitchToV3(float ratio) {
     id allEmo = [d objectForKey:kAWECFishEmotionAll];
     self.fishEmotionAll = [allEmo isKindOfClass:[NSArray class]] ? allEmo : @[];
     // 中文备注：平行数组，长度对齐 fishEmotionAll（旧数据无备注 -> 全空串兼容）
-    id notes = [d objectForKey:kAWECFishEmotionNotes];
+    NSArray *notes = [d objectForKey:kAWECFishEmotionNotes];
+    if (![notes isKindOfClass:[NSArray class]]) notes = nil;
     NSMutableArray<NSString *> *aligned = [NSMutableArray arrayWithCapacity:self.fishEmotionAll.count];
     for (NSUInteger i = 0; i < self.fishEmotionAll.count; i++) {
-        NSString *n = ([notes isKindOfClass:[NSArray class]] && i < notes.count) ? notes[i] : nil;
+        NSString *n = (notes && i < notes.count) ? notes[i] : nil;
         [aligned addObject:([n isKindOfClass:[NSString class]] ? n : @"")];
     }
     self.fishEmotionNotes = aligned;
