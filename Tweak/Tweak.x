@@ -157,10 +157,6 @@ static void AWECAPrivateNotePath(NSString *path) {
     [enhance beginIfNeededAtPath:path];   // 趁用户停确认面板上，提前消化数十秒合成耗时
 }
 
-static void AWECACall1(id target, SEL sel, id a) {
-    if (!target || !sel) return;
-    ((void (*)(id, SEL, id))objc_msgSend)(target, sel, a);
-}
 static void AWECACall2(id target, SEL sel, id a, id b) {
     if (!target || !sel) return;
     ((void (*)(id, SEL, id, id))objc_msgSend)(target, sel, a, b);
