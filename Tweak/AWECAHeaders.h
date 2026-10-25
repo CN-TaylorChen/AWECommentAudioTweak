@@ -93,16 +93,6 @@
 - (void)clear;
 @end
 
-// 私聊（IM）录音控制（IPA 40.8.0 确认：AWEIMAudioRecordController，链路与评论区同构）
-
-@interface AWEIMAudioRecordController : NSObject
-@property (copy, nonatomic) NSString *recordFilePath;
-@property (strong, nonatomic) id recorder;
-@property (weak, nonatomic) id delegate;
-- (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 action:(NSInteger)arg3 error:(id)arg4;
-- (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 error:(id)arg3;
-@end
-
 // 私聊录音器（新旧架构共用：控制器 _recorder 即 <IESIMAudioMessageRecorderInterface>）
 // 录音落盘时机以这里为准，不依赖具体是哪个控制器类
 
@@ -110,22 +100,54 @@
 @property (copy, nonatomic) NSURL *url;
 @property (nonatomic) unsigned long long status;
 @property (nonatomic) double currentTime;
-- (void)audioEngineRecorder:(id)arg1 didFinishRecordingWithData:(id)arg2 successfully:(BOOL)arg3;
-- (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 error:(id)arg3;
+- (void)audioRecorderDidFinishRecording:(id)arg1 successfully:(BOOL)arg2 action:(NSInteger)arg3;
 @end
 
 // 私聊输入 VC（实现 AWEIMAudioInputTouchViewDelegate 触摸事件）
+// 注：binary 反查显示 audioInputTouchView* 实际由控制器实现，本类只是调用方，钩子挂这里会成死钩。保留以便兜底发现。
 
 @interface AWEIMDNewInputViewController : NSObject
-- (void)audioInputTouchViewTouchDownInside:(id)arg1;
-- (void)audioInputTouchViewTouchUpInside:(id)arg1 cancelled:(BOOL)arg2;
-- (void)audioInputTouchViewTouchUpInside:(id)arg1 cancelled:(BOOL)arg2 isInTranslate:(BOOL)arg3;
-- (void)audioInputTouchViewTouchUpOutside:(id)arg1 cancelled:(BOOL)arg2;
-- (void)audioInputTouchViewDidTapSendAudio:(id)arg1;
-// 新录音面板（AWEIMRichRecorderAnimationViewDelegate）——40.8.0 私聊实际走这条
+@end
+
+// 新录音面板触摸层（IPA 40.8.0 确认：recorderAnimationViewDidTapSendAudio: 的真正实现者）
+// 它是 AWEIMRichRecorderAnimationView 的 delegate，再把事件转给 AWEIMAudioRecordController / AWEIMFormatAudioRecordController
+
+@interface AWEIMOptimizeAudioInputTouchView : NSObject
+@property (weak, nonatomic) id delegate;
+- (void)startRecord;
+- (void)cancelRecord;
+- (void)stopRecordWithInTranslate:(BOOL)arg1;
 - (void)recorderAnimationViewDidTapSendAudio:(id)arg1;
 - (void)recorderAnimationViewDidTapCancel:(id)arg1;
-- (void)recorderAnimationViewDidMoveToTranslate:(id)arg1;
+@end
+
+// 私聊新控制器（Format 架构）：发送时直接传 NSData，无落盘文件路径。
+// IPA 确认：sendRecordMessageIfNeededWithData:audioRecorder: 仅本类实现。
+
+@interface AWEIMFormatAudioRecordController : NSObject
+- (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 action:(NSInteger)arg3 error:(id)arg4;
+- (void)audioInputTouchViewTouchDownInside:(id)arg1;
+- (void)audioInputTouchViewTouchUpInside:(id)arg1 cancelled:(BOOL)arg2 isInTranslate:(BOOL)arg3;
+- (void)audioInputTouchViewTouchUpOutside:(id)arg1 cancelled:(BOOL)arg2;
+- (void)audioInputTouchViewDidTapCancel:(id)arg1;
+- (void)audioInputTouchViewDidTapSendAudio:(id)arg1;
+- (void)sendRecordMessageIfNeededWithData:(id)arg1 audioRecorder:(id)arg2;
+@end
+
+// 私聊老控制器（文件路径架构）：sendRecordMessageIfNeededWithFilePath:audioRecorder: 仅本类实现。
+
+@interface AWEIMAudioRecordController : NSObject
+@property (copy, nonatomic) NSString *recordFilePath;
+@property (strong, nonatomic) id recorder;
+@property (weak, nonatomic) id delegate;
+- (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 action:(NSInteger)arg3 error:(id)arg4;
+- (void)audioRecorderStartRecord:(id)arg1 error:(id)arg2;
+- (void)sendRecordMessageIfNeededWithFilePath:(id)arg1 audioRecorder:(id)arg2;
+- (void)audioInputTouchViewTouchDownInside:(id)arg1;
+- (void)audioInputTouchViewTouchUpInside:(id)arg1 cancelled:(BOOL)arg2 isInTranslate:(BOOL)arg3;
+- (void)audioInputTouchViewTouchUpOutside:(id)arg1 cancelled:(BOOL)arg2;
+- (void)audioInputTouchViewDidTapCancel:(id)arg1;
+- (void)audioInputTouchViewDidTapSendAudio:(id)arg1;
 @end
 
 // 长按菜单
