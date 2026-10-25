@@ -15,6 +15,7 @@
 @class AWECommentAudioRecorderController;
 @class AWEIMAudioRecordController;
 @class AWEIMDNewInputViewController;
+@class AWEIMAudioMessageRecorder;
 @class AWECommentLongPressPanelParam;
 @class AWECommentLongPressPanelCommonModel;
 @class AWECommentLongPressPanelBizParam;
@@ -102,6 +103,17 @@
 - (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 error:(id)arg3;
 @end
 
+// 私聊录音器（新旧架构共用：控制器 _recorder 即 <IESIMAudioMessageRecorderInterface>）
+// 录音落盘时机以这里为准，不依赖具体是哪个控制器类
+
+@interface AWEIMAudioMessageRecorder : NSObject
+@property (copy, nonatomic) NSURL *url;
+@property (nonatomic) unsigned long long status;
+@property (nonatomic) double currentTime;
+- (void)audioEngineRecorder:(id)arg1 didFinishRecordingWithData:(id)arg2 successfully:(BOOL)arg3;
+- (void)audioRecorderDidFinishRecording:(id)arg1 success:(BOOL)arg2 error:(id)arg3;
+@end
+
 // 私聊输入 VC（实现 AWEIMAudioInputTouchViewDelegate 触摸事件）
 
 @interface AWEIMDNewInputViewController : NSObject
@@ -109,6 +121,11 @@
 - (void)audioInputTouchViewTouchUpInside:(id)arg1 cancelled:(BOOL)arg2;
 - (void)audioInputTouchViewTouchUpInside:(id)arg1 cancelled:(BOOL)arg2 isInTranslate:(BOOL)arg3;
 - (void)audioInputTouchViewTouchUpOutside:(id)arg1 cancelled:(BOOL)arg2;
+- (void)audioInputTouchViewDidTapSendAudio:(id)arg1;
+// 新录音面板（AWEIMRichRecorderAnimationViewDelegate）——40.8.0 私聊实际走这条
+- (void)recorderAnimationViewDidTapSendAudio:(id)arg1;
+- (void)recorderAnimationViewDidTapCancel:(id)arg1;
+- (void)recorderAnimationViewDidMoveToTranslate:(id)arg1;
 @end
 
 // 长按菜单
